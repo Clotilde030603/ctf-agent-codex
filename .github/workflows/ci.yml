@@ -44,6 +44,8 @@ jobs:
             python -m pip install -e ".[dev]"
             ruff check .
             mypy src
+            python -m compileall -q src tests evals
+            ctf-agent benchmark evals/manifest.yaml
             pytest
           else
             echo "pyproject.toml not present yet; skipped package checks."

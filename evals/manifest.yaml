@@ -1,4 +1,10 @@
+repeat_runs: 3
+timeout_seconds: 30
+total_budget_seconds: 300
 challenges:
   - id: local-retired-warmup
+    category: warmup
+    difficulty: retired
     command: [python3, fixtures/retired-warmup/solve.py]
     expected_flag: flag{retired_fixture_only}
+    clean_mode: local
