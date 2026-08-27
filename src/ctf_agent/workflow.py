@@ -28,8 +28,11 @@ from ctf_agent.schemas import (
     SubmissionVerdict,
 )
 from ctf_agent.security import redact_persisted_value
+from ctf_agent.specialists.crypto import CryptoSpecialist
 from ctf_agent.specialists.deterministic import ArtifactSignalSpecialist
+from ctf_agent.specialists.forensics import ForensicsSpecialist
 from ctf_agent.specialists.model import BackendFactory, ModelSolverSpecialist
+from ctf_agent.specialists.web import StaticWebSpecialist
 from ctf_agent.triage import ScanConfig, classify_report, scan_path
 from ctf_agent.verification import FlagGate, RejectedCandidates, ReplayVerifier, SubmissionBudget
 from ctf_agent.workers import SharedModelCallBudget
@@ -290,54 +293,69 @@ class AutonomousWorkflow:
             solved = True
             stop_reason = "artifact_signal"
         else:
-            existing_model_requests = sum(
-                event["event_type"] == "model.request"
-                for event in context.ledger.list(context.record.run_id)
-            )
-            remaining_model_calls = max(
-                0, self.settings.model_call_budget - existing_model_requests
-            )
-
-            def record_solver_call(index: int) -> None:
-                context.ledger.append(
-                    context.record.run_id,
-                    "model.request",
-                    {
-                        "role": "solver",
-                        "model": self.settings.solver_model,
-                        "request_index": existing_model_requests + index,
-                    },
-                    state=RunState.SOLVE.value,
+            preliminary_results = [preflight]
+            category_specialist = self._category_specialist(triage_data)
+            category_result = None
+            if category_specialist is not None:
+                category_result = await category_specialist.solve(
+                    hypotheses[0], solver_context
+                )
+                preliminary_results.append(category_result)
+            if (
+                category_result is not None
+                and category_result.status == "confirmed"
+                and category_result.flag_candidates
+            ):
+                specialist_results = tuple(preliminary_results)
+                solved = True
+                stop_reason = f"category_{category_specialist.name}"
+            elif self.settings.backend != "codex":
+                specialist_results = tuple(preliminary_results)
+                solved = False
+                stop_reason = "no_model_backend"
+            else:
+                existing_model_requests = sum(
+                    event["event_type"] == "model.request"
+                    for event in context.ledger.list(context.record.run_id)
+                )
+                remaining_model_calls = max(
+                    0, self.settings.model_call_budget - existing_model_requests
                 )
 
-            shared_model_budget = SharedModelCallBudget(
-                remaining_model_calls,
-                on_reserve=record_solver_call,
-            )
-            specialists = (
-                (
-                    ModelSolverSpecialist(
-                        self.settings,
-                        backend_factory=self._solver_backend_factory,
-                        local_test_mode=self._worker_local_test_mode,
-                        allowed_argv0=self._worker_allowed_argv0,
-                        shared_model_budget=shared_model_budget,
-                    ),
+                def record_solver_call(index: int) -> None:
+                    context.ledger.append(
+                        context.record.run_id,
+                        "model.request",
+                        {
+                            "role": "solver",
+                            "model": self.settings.solver_model,
+                            "request_index": existing_model_requests + index,
+                        },
+                        state=RunState.SOLVE.value,
+                    )
+
+                shared_model_budget = SharedModelCallBudget(
+                    remaining_model_calls,
+                    on_reserve=record_solver_call,
                 )
-                if self.settings.backend == "codex"
-                else (ArtifactSignalSpecialist(),)
-            )
-            scheduler = Scheduler(
-                StaticHypothesisPlanner(hypotheses),
-                specialists,
-                no_progress_cutoff=3,
-                max_rounds=1,
-                max_concurrency=self.settings.max_workers,
-            )
-            result = await scheduler.run(solver_context)
-            specialist_results = result.specialist_results
-            solved = result.solved
-            stop_reason = result.stop_reason
+                model_specialist = ModelSolverSpecialist(
+                    self.settings,
+                    backend_factory=self._solver_backend_factory,
+                    local_test_mode=self._worker_local_test_mode,
+                    allowed_argv0=self._worker_allowed_argv0,
+                    shared_model_budget=shared_model_budget,
+                )
+                scheduler = Scheduler(
+                    StaticHypothesisPlanner(hypotheses),
+                    (model_specialist,),
+                    no_progress_cutoff=3,
+                    max_rounds=1,
+                    max_concurrency=self.settings.max_workers,
+                )
+                result = await scheduler.run(solver_context)
+                specialist_results = tuple(preliminary_results) + result.specialist_results
+                solved = result.solved
+                stop_reason = result.stop_reason
         _write_json(
             context.record.run_dir / "artifacts" / "specialist-results.json",
             [item.model_dump(mode="json") for item in specialist_results],
@@ -710,6 +728,22 @@ class AutonomousWorkflow:
             "run_dir": str(context.record.run_dir),
             "triage": triage_data,
         }
+
+    @staticmethod
+    def _category_specialist(triage_data: object) -> Any:
+        if not isinstance(triage_data, dict):
+            return None
+        classification = triage_data.get("classification", {})
+        if not isinstance(classification, dict):
+            return None
+        primary = str(classification.get("primary_category", "")).lower()
+        if primary in {"crypto-math", "crypto-binary"}:
+            return CryptoSpecialist()
+        if primary in {"forensics", "misc"}:
+            return ForensicsSpecialist()
+        if primary == "web":
+            return StaticWebSpecialist()
+        return None
 
     @staticmethod
     def _promote_solver(

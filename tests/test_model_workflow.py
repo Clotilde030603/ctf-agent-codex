@@ -222,14 +222,14 @@ def test_model_solver_worker_is_used_when_preflight_finds_no_flag(tmp_path: Path
         id="8",
         url="https://ctf.test/challenges/8",
         title="Encoded Model Fixture",
-        category="crypto-binary",
+        category="rev",
         flag_policy=FlagPolicy(pattern=r"flag\{[^{}]+\}"),
     )
     encoded = base64.b64encode(b"flag{workflow_model_worker}").decode()
     (context.record.run_dir / "files" / "payload.txt").write_text(encoded)
     triage = {
         "classification": {
-            "primary_category": "crypto-binary",
+            "primary_category": "rev",
             "evidence": [{"reason": "base64-like payload"}],
         },
         "files": [
@@ -257,7 +257,11 @@ def test_model_solver_worker_is_used_when_preflight_finds_no_flag(tmp_path: Path
     persisted = json.loads(
         (context.record.run_dir / "artifacts" / "specialist-results.json").read_text()
     )
-    assert persisted[0]["flag_candidates"][0]["value"] == "flag{workflow_model_worker}"
+    assert any(
+        candidate["value"] == "flag{workflow_model_worker}"
+        for result in persisted
+        for candidate in result["flag_candidates"]
+    )
     assert len(solver_backend.requests) == 3
     model_events = [
         event
