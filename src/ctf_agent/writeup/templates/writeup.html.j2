@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{ title }}</title>
+  <style>
+    body { font: 16px/1.55 system-ui, sans-serif; margin: 2rem; color: #111827; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    pre { background: #f3f4f6; border: 1px solid #d1d5db; padding: 1rem; overflow: auto; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #d1d5db; padding: .45rem; text-align: left; }
+  </style>
+</head>
+<body>
+  <h1>{{ title }}</h1>
+  <p>Generated: {{ generated_at }}</p>
+
+  <h2>Challenge</h2>
+  <ul>
+    <li>Category: {{ category }}</li>
+    <li>Points: {{ points }}</li>
+    <li>URL: {{ url }}</li>
+  </ul>
+  <p>{{ summary }}</p>
+
+  <h2>Verified Flag</h2>
+  <p><code>{{ display_flag }}</code></p>
+  <p>Flag reference: <code>{{ flag_reference }}</code></p>
+
+  <h2>Evidence</h2>
+  <table>
+    <thead><tr><th>Label</th><th>Path</th><th>SHA-256</th><th>Producer</th></tr></thead>
+    <tbody>
+      {% for entry in evidence.entries -%}
+      <tr>
+        <td>{{ entry.label }}</td>
+        <td><code>{{ entry.path }}</code></td>
+        <td><code>{{ entry.sha256 }}</code></td>
+        <td>{{ entry.producer or entry.source or "" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Capture Failures</h2>
+  <ul>
+    {% for failure in evidence.failures -%}
+    <li>{{ failure.label }}: {{ failure.reason }}</li>
+    {% else -%}
+    <li>No capture failures recorded.</li>
+    {% endfor %}
+  </ul>
+
+  <h2>Triage</h2>
+  <pre>{{ triage | json }}</pre>
+
+  <h2>Hypotheses</h2>
+  <pre>{{ hypotheses | json }}</pre>
+
+  <h2>Timeline</h2>
+  <ul>
+    {% for event in events -%}
+    <li>{{ event.stage | default(event.state | default(event.type | default("UNKNOWN"))) }}: {{ event.message | default(event.type | default(event)) }}</li>
+    {% else -%}
+    <li>No events recorded.</li>
+    {% endfor %}
+  </ul>
+
+  <h2>Reproduction</h2>
+  <pre>python3 solve.py</pre>
+  <pre>{{ display_solve_py.strip() }}</pre>
+</body>
+</html>

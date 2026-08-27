@@ -33,6 +33,7 @@ def solve(
     allow_local_reproduction: Annotated[
         bool, typer.Option("--allow-local-reproduction")
     ] = False,
+    redact_flag: Annotated[bool, typer.Option("--redact-flag")] = False,
 ) -> None:
     """Create and execute a new challenge run."""
     if auto_submit and dry_run:
@@ -52,6 +53,7 @@ def solve(
             "runs_dir": runs_dir,
             "allow_private_hosts": allow_private_host,
             "allow_local_reproduction": allow_local_reproduction,
+            "redact_flag": redact_flag,
         }
     )
     workflow = AutonomousWorkflow(settings)

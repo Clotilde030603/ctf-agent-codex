@@ -24,7 +24,9 @@ Generated: {{ generated_at }}
 
 ## Verified Flag
 
-`{{ flag }}`
+`{{ display_flag }}`
+
+Flag reference: `{{ flag_reference }}`
 
 ## Evidence
 
@@ -32,6 +34,14 @@ Generated: {{ generated_at }}
 - `{{ entry.path }}` ({{ entry.label }}, sha256 `{{ entry.sha256 }}`)
 {% else -%}
 - No evidence files recorded.
+{% endfor %}
+
+## Capture Failures
+
+{% for failure in evidence.failures -%}
+- {{ failure.label }}: {{ failure.reason }}
+{% else -%}
+- No capture failures recorded.
 {% endfor %}
 
 ## Timeline
@@ -51,5 +61,5 @@ python3 solve.py
 ```
 
 ```python
-{{ solve_py.strip() }}
+{{ display_solve_py.strip() }}
 ```

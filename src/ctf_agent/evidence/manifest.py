@@ -31,6 +31,12 @@ class EvidenceEntry:
     created_at: str
     source: str | None = None
     redacted: bool = False
+    producer: str | None = None
+    command: str | None = None
+    exit_code: int | None = None
+    model: str | None = None
+    tool: str | None = None
+    event_id: int | str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -43,6 +49,12 @@ class EvidenceEntry:
         media_type: str,
         source: str | None = None,
         redacted: bool = False,
+        producer: str | None = None,
+        command: str | None = None,
+        exit_code: int | None = None,
+        model: str | None = None,
+        tool: str | None = None,
+        event_id: int | str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> EvidenceEntry:
         return cls(
@@ -53,6 +65,12 @@ class EvidenceEntry:
             created_at=_now_iso(),
             source=source,
             redacted=redacted,
+            producer=producer,
+            command=command,
+            exit_code=exit_code,
+            model=model,
+            tool=tool,
+            event_id=event_id,
             metadata=dict(metadata or {}),
         )
 
@@ -65,6 +83,12 @@ class EvidenceEntry:
             "created_at": self.created_at,
             "source": self.source,
             "redacted": self.redacted,
+            "producer": self.producer,
+            "command": self.command,
+            "exit_code": self.exit_code,
+            "model": self.model,
+            "tool": self.tool,
+            "event_id": self.event_id,
             "metadata": self.metadata,
         }
 
@@ -78,6 +102,12 @@ class EvidenceEntry:
             created_at=str(data["created_at"]),
             source=data.get("source"),
             redacted=bool(data.get("redacted", False)),
+            producer=data.get("producer"),
+            command=data.get("command"),
+            exit_code=data.get("exit_code"),
+            model=data.get("model"),
+            tool=data.get("tool"),
+            event_id=data.get("event_id"),
             metadata=dict(data.get("metadata", {})),
         )
 
@@ -107,11 +137,58 @@ class EvidenceEvent:
         )
 
 
+@dataclass(frozen=True)
+class EvidenceCaptureFailure:
+    label: str
+    stage: str
+    reason: str
+    created_at: str = field(default_factory=_now_iso)
+    producer: str | None = None
+    command: str | None = None
+    exit_code: int | None = None
+    model: str | None = None
+    tool: str | None = None
+    event_id: int | str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "label": self.label,
+            "stage": self.stage,
+            "reason": self.reason,
+            "created_at": self.created_at,
+            "producer": self.producer,
+            "command": self.command,
+            "exit_code": self.exit_code,
+            "model": self.model,
+            "tool": self.tool,
+            "event_id": self.event_id,
+            "metadata": self.metadata,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> EvidenceCaptureFailure:
+        return cls(
+            label=str(data["label"]),
+            stage=str(data["stage"]),
+            reason=str(data["reason"]),
+            created_at=str(data["created_at"]),
+            producer=data.get("producer"),
+            command=data.get("command"),
+            exit_code=data.get("exit_code"),
+            model=data.get("model"),
+            tool=data.get("tool"),
+            event_id=data.get("event_id"),
+            metadata=dict(data.get("metadata", {})),
+        )
+
+
 @dataclass
 class EvidenceManifest:
     run_id: str
     entries: list[EvidenceEntry] = field(default_factory=list)
     events: list[EvidenceEvent] = field(default_factory=list)
+    failures: list[EvidenceCaptureFailure] = field(default_factory=list)
     version: int = 1
 
     def add_file(
@@ -123,6 +200,12 @@ class EvidenceManifest:
         media_type: str,
         source: str | None = None,
         redacted: bool = False,
+        producer: str | None = None,
+        command: str | None = None,
+        exit_code: int | None = None,
+        model: str | None = None,
+        tool: str | None = None,
+        event_id: int | str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> EvidenceEntry:
         entry = EvidenceEntry.from_file(
@@ -132,10 +215,45 @@ class EvidenceManifest:
             media_type=media_type,
             source=source,
             redacted=redacted,
+            producer=producer,
+            command=command,
+            exit_code=exit_code,
+            model=model,
+            tool=tool,
+            event_id=event_id,
             metadata=metadata,
         )
         self.entries.append(entry)
         return entry
+
+    def add_capture_failure(
+        self,
+        label: str,
+        *,
+        stage: str,
+        reason: str,
+        producer: str | None = None,
+        command: str | None = None,
+        exit_code: int | None = None,
+        model: str | None = None,
+        tool: str | None = None,
+        event_id: int | str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> EvidenceCaptureFailure:
+        failure = EvidenceCaptureFailure(
+            label=label,
+            stage=stage,
+            reason=reason,
+            producer=producer,
+            command=command,
+            exit_code=exit_code,
+            model=model,
+            tool=tool,
+            event_id=event_id,
+            metadata=dict(metadata or {}),
+        )
+        self.failures.append(failure)
+        return failure
 
     def add_event(self, stage: str, message: str, **data: Any) -> EvidenceEvent:
         event = EvidenceEvent(stage=stage, message=message, data=data)
@@ -162,6 +280,7 @@ class EvidenceManifest:
             "run_id": self.run_id,
             "entries": [entry.to_dict() for entry in self.entries],
             "events": [event.to_dict() for event in self.events],
+            "failures": [failure.to_dict() for failure in self.failures],
         }
 
     @classmethod
@@ -171,6 +290,9 @@ class EvidenceManifest:
             run_id=str(data["run_id"]),
             entries=[EvidenceEntry.from_dict(item) for item in data.get("entries", [])],
             events=[EvidenceEvent.from_dict(item) for item in data.get("events", [])],
+            failures=[
+                EvidenceCaptureFailure.from_dict(item) for item in data.get("failures", [])
+            ],
         )
 
     def save(self, path: Path) -> Path:

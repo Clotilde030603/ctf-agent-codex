@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from ctf_agent.config import Settings
+from ctf_agent.evidence import TerminalRenderResult
 from ctf_agent.ingestion.session import ScopedAsyncSession
 from ctf_agent.platforms.ctfd import CTFdPlatformAdapter
 from ctf_agent.schemas import RunState
@@ -29,6 +30,21 @@ class EvidenceCTFdAdapter(CTFdPlatformAdapter):
         destination.write_bytes(PNG)
         return destination
 
+
+class FakeTerminalRenderer:
+    def render(
+        self,
+        transcript: str | bytes,
+        output_dir: Path,
+        *,
+        stem: str,
+        command: str,
+    ) -> TerminalRenderResult:
+        html = output_dir / f"{stem}.html"
+        png = output_dir / f"{stem}.png"
+        html.write_text(str(transcript), encoding="utf-8")
+        png.write_bytes(PNG)
+        return TerminalRenderResult(html, png, False, "created")
 
 def fixture_adapter(submitted: list[str]) -> tuple[httpx.AsyncClient, EvidenceCTFdAdapter]:
     def handle(request: httpx.Request) -> httpx.Response:
@@ -87,6 +103,7 @@ async def test_mock_ctfd_api_full_workflow(tmp_path: Path) -> None:
             allow_local_reproduction=True,
         ),
         adapter,
+        terminal_renderer=FakeTerminalRenderer(),
     )
     controller = workflow.controller()
     context = controller.create_run(
@@ -99,6 +116,8 @@ async def test_mock_ctfd_api_full_workflow(tmp_path: Path) -> None:
     assert submitted == ["flag{mock_ctfd_accepted}"]
     assert (result.run_dir / "requirements.txt").is_file()
     assert (result.run_dir / "writeup.md").is_file()
+    assert (result.run_dir / "writeup.html").is_file()
+    assert (result.run_dir / "provenance.json").is_file()
 
 
 @pytest.mark.asyncio
@@ -111,7 +130,9 @@ async def test_resume_from_ingest_checkpoint(tmp_path: Path) -> None:
         tool_timeout_seconds=5,
         allow_local_reproduction=True,
     )
-    workflow = AutonomousWorkflow(settings, adapter)
+    workflow = AutonomousWorkflow(
+        settings, adapter, terminal_renderer=FakeTerminalRenderer()
+    )
     controller = workflow.controller()
     context = controller.create_run(
         "https://ctf.test/challenges/7", auto_submit=True, writeup=True

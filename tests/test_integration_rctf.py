@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from ctf_agent.config import Settings
+from ctf_agent.evidence import TerminalRenderResult
 from ctf_agent.ingestion.session import ScopedAsyncSession
 from ctf_agent.platforms.base import SubmissionVerdict
 from ctf_agent.platforms.rctf import RCTFPlatformAdapter, parse_rctf_submission
@@ -30,6 +31,21 @@ class EvidenceRCTFAdapter(RCTFPlatformAdapter):
         destination.write_bytes(PNG)
         return destination
 
+
+class FakeTerminalRenderer:
+    def render(
+        self,
+        transcript: str | bytes,
+        output_dir: Path,
+        *,
+        stem: str,
+        command: str,
+    ) -> TerminalRenderResult:
+        html = output_dir / f"{stem}.html"
+        png = output_dir / f"{stem}.png"
+        html.write_text(str(transcript), encoding="utf-8")
+        png.write_bytes(PNG)
+        return TerminalRenderResult(html, png, False, "created")
 
 def rctf_fixture(
     submitted: list[str], solved: bool = False
@@ -147,6 +163,7 @@ async def test_fake_rctf_full_workflow_reaches_done(tmp_path: Path) -> None:
             allow_local_reproduction=True,
         ),
         adapter,
+        terminal_renderer=FakeTerminalRenderer(),
     )
     context = workflow.controller().create_run(
         "https://rctf.test/challs/web-warmup",
@@ -161,3 +178,5 @@ async def test_fake_rctf_full_workflow_reaches_done(tmp_path: Path) -> None:
     assert submitted == ["flag{rctf_fixture}"]
     assert (result.run_dir / "evidence" / "03-accepted.png").is_file()
     assert (result.run_dir / "writeup.md").is_file()
+    assert (result.run_dir / "writeup.html").is_file()
+    assert (result.run_dir / "provenance.json").is_file()

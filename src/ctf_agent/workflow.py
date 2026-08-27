@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import shutil
@@ -67,6 +66,7 @@ class AutonomousWorkflow:
         solver_backend_factory: BackendFactory = create_codex_backend,
         worker_local_test_mode: bool = False,
         worker_allowed_argv0: set[str] | None = None,
+        terminal_renderer: TerminalRenderer | None = None,
     ) -> None:
         self.settings = settings
         self._adapter_override = adapter
@@ -74,6 +74,7 @@ class AutonomousWorkflow:
         self._solver_backend_factory = solver_backend_factory
         self._worker_local_test_mode = worker_local_test_mode
         self._worker_allowed_argv0 = worker_allowed_argv0
+        self._terminal_renderer = terminal_renderer or TerminalRenderer()
         self.handlers: dict[RunState, StateHandler] = {
             RunState.AUTHENTICATE: self.authenticate,
             RunState.INGEST: self.ingest,
@@ -630,30 +631,71 @@ class AutonomousWorkflow:
         evidence_dir = run_dir / "evidence"
         challenge = self._challenge(context)
         adapter = await self._adapter(context)
-        challenge_image = await adapter.capture_challenge(
-            challenge, evidence_dir / "01-challenge.png"
-        )
+        manifest = EvidenceManifest(context.record.run_id)
+        failures: list[str] = []
+        try:
+            challenge_image = await adapter.capture_challenge(
+                challenge, evidence_dir / "01-challenge.png"
+            )
+        except Exception as exc:
+            challenge_image = None
+            failures.append(f"challenge screenshot failed: {type(exc).__name__}: {exc}")
         replay = context.values.get("replay")
         transcript = getattr(replay, "stdout", "") or self._candidate(context).value
-        terminal = TerminalRenderer().render(
-            transcript,
-            evidence_dir,
-            stem="02-exploit-proof",
-            command="python3 solve.py",
-        )
-        proof_image = terminal.png_path
-        if proof_image is None:
-            proof_image = evidence_dir / "02-exploit-proof.png"
-            proof_image.write_bytes(base64.b64decode(_FALLBACK_PNG))
-        verdict_image = await adapter.capture_verdict(
-            challenge, evidence_dir / "03-accepted.png"
-        )
-        required = [challenge_image, proof_image, verdict_image]
-        if any(path is None or not path.is_file() for path in required):
-            raise RuntimeError(
-                "platform evidence capture did not produce all three required images"
+        try:
+            terminal = self._terminal_renderer.render(
+                transcript,
+                evidence_dir,
+                stem="02-exploit-proof",
+                command="python3 solve.py",
             )
-        manifest = EvidenceManifest(context.record.run_id)
+        except Exception as exc:
+            terminal = None
+            failures.append(f"terminal render failed: {type(exc).__name__}: {exc}")
+        proof_image = terminal.png_path if terminal is not None else None
+        if terminal is not None and terminal.html_path.is_file():
+            manifest.add_file(
+                terminal.html_path,
+                root=run_dir,
+                label="exploit-proof-transcript",
+                media_type="text/html",
+                source="solver-replay",
+                redacted=terminal.redacted,
+                metadata={"screenshot_status": terminal.screenshot_status},
+                producer="ctf_agent.evidence.TerminalRenderer",
+                command="python3 solve.py",
+                exit_code=getattr(replay, "returncode", None),
+                model=self.settings.solver_model,
+                tool="python",
+            )
+        if proof_image is None:
+            status = terminal.screenshot_status if terminal is not None else "render-error"
+            failures.append(f"terminal screenshot failed: {status}")
+        try:
+            verdict_image = await adapter.capture_verdict(
+                challenge, evidence_dir / "03-accepted.png"
+            )
+        except Exception as exc:
+            verdict_image = None
+            failures.append(f"verdict screenshot failed: {type(exc).__name__}: {exc}")
+        if challenge_image is None or not challenge_image.is_file():
+            failures.append("challenge screenshot was not created")
+        if verdict_image is None or not verdict_image.is_file():
+            failures.append("verdict screenshot was not created")
+        if failures:
+            for failure in dict.fromkeys(failures):
+                manifest.add_event("EVIDENCE_FAILURE", failure, accepted=False)
+                manifest.add_capture_failure(
+                    "required-evidence",
+                    stage="EVIDENCE",
+                    reason=failure,
+                    producer="ctf_agent.workflow.AutonomousWorkflow",
+                )
+            manifest.save(evidence_dir / "manifest.json")
+            raise RuntimeError(
+                "required evidence capture failed: " + "; ".join(dict.fromkeys(failures))
+            )
+        required = (challenge_image, proof_image, verdict_image)
         labels = ("challenge", "exploit-proof", "accepted")
         for label, path in zip(labels, required, strict=True):
             assert path is not None
@@ -664,15 +706,20 @@ class AutonomousWorkflow:
                 media_type="image/png",
                 source="platform" if label != "exploit-proof" else "solver-replay",
                 redacted=label == "exploit-proof",
+                producer=(
+                    type(adapter).__name__
+                    if label != "exploit-proof"
+                    else "ctf_agent.evidence.TerminalRenderer"
+                ),
+                command="python3 solve.py" if label == "exploit-proof" else None,
+                exit_code=(
+                    getattr(replay, "returncode", None)
+                    if label == "exploit-proof"
+                    else None
+                ),
+                model=self.settings.solver_model if label == "exploit-proof" else None,
+                tool="python" if label == "exploit-proof" else "playwright",
             )
-        manifest.add_file(
-            terminal.html_path,
-            root=run_dir,
-            label="exploit-proof-transcript",
-            media_type="text/html",
-            source="solver-replay",
-            redacted=terminal.redacted,
-        )
         flag = self._candidate(context).value
         manifest.add_event("VERIFY", "candidate independently replayed", flag=flag)
         manifest.add_event("SUBMIT", "platform accepted candidate", flag=flag, accepted=True)
@@ -682,11 +729,22 @@ class AutonomousWorkflow:
 
     async def writeup(self, context: RunContext) -> StateOutcome:
         generator = WriteupGenerator()
-        output = generator.generate(context.record.run_dir)
-        validation = WriteupValidator().validate(context.record.run_dir, output)
+        outputs = generator.generate_all(
+            context.record.run_dir,
+            redact_flags=self.settings.redact_flag,
+        )
+        validation = WriteupValidator().validate_all(context.record.run_dir)
         if not validation.ok:
             raise RuntimeError("write-up validation failed: " + "; ".join(validation.errors))
-        return StateOutcome(RunState.REPRODUCE, {"writeup": str(output)})
+        return StateOutcome(
+            RunState.REPRODUCE,
+            {
+                "writeup_markdown": str(outputs.markdown_path),
+                "writeup_html": str(outputs.html_path),
+                "provenance": str(outputs.provenance_path),
+                "redact_flag": self.settings.redact_flag,
+            },
+        )
 
     async def reproduce(self, context: RunContext) -> StateOutcome:
         result = await reproduce_solver(
@@ -870,9 +928,3 @@ class AutonomousWorkflow:
     @staticmethod
     def _challenge_url(context: RunContext) -> str:
         return str(context.values.get("challenge_url") or context.record.challenge_url)
-
-
-_FALLBACK_PNG = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
-    "/wcAAusB9Y9Z4ioAAAAASUVORK5CYII="
-)

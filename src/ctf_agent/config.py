@@ -42,4 +42,5 @@ class Settings(BaseSettings):
     browser_storage_state: Path | None = None
     allow_private_hosts: bool = False
     allow_local_reproduction: bool = False
+    redact_flag: bool = False
     docker_image: str = "python:3.12-slim"

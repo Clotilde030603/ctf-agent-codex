@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from ctf_agent.config import Settings
+from ctf_agent.evidence import TerminalRenderResult
 from ctf_agent.schemas import (
     Artifact,
     AuthSession,
@@ -24,6 +25,36 @@ from ctf_agent.workflow import AutonomousWorkflow
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk/wcAAusB9Y9Z4ioAAAAASUVORK5CYII="
 )
+
+
+class FakeTerminalRenderer:
+    def render(
+        self,
+        transcript: str | bytes,
+        output_dir: Path,
+        *,
+        stem: str,
+        command: str,
+    ) -> TerminalRenderResult:
+        html = output_dir / f"{stem}.html"
+        png = output_dir / f"{stem}.png"
+        html.write_text(str(transcript), encoding="utf-8")
+        png.write_bytes(PNG)
+        return TerminalRenderResult(html, png, False, "created")
+
+
+class HtmlOnlyTerminalRenderer:
+    def render(
+        self,
+        transcript: str | bytes,
+        output_dir: Path,
+        *,
+        stem: str,
+        command: str,
+    ) -> TerminalRenderResult:
+        html = output_dir / f"{stem}.html"
+        html.write_text(str(transcript), encoding="utf-8")
+        return TerminalRenderResult(html, None, False, "playwright-unavailable")
 
 
 class FakeCTFdAdapter:
@@ -104,7 +135,11 @@ async def test_fake_ctfd_end_to_end_vertical_slice(tmp_path: Path) -> None:
         submission_budget=2,
         allow_local_reproduction=True,
     )
-    workflow = AutonomousWorkflow(settings, FakeCTFdAdapter())
+    workflow = AutonomousWorkflow(
+        settings,
+        FakeCTFdAdapter(),
+        terminal_renderer=FakeTerminalRenderer(),
+    )
     controller = workflow.controller()
     context = controller.create_run(
         "https://ctf.test/challenges/7", auto_submit=True, writeup=True
@@ -120,6 +155,8 @@ async def test_fake_ctfd_end_to_end_vertical_slice(tmp_path: Path) -> None:
         "events.jsonl",
         "solve.py",
         "writeup.md",
+        "writeup.html",
+        "provenance.json",
     }
     assert expected.issubset({path.name for path in result.run_dir.iterdir()})
     assert (result.run_dir / "evidence" / "01-challenge.png").is_file()
@@ -141,7 +178,9 @@ async def test_pending_submission_is_resolved_without_duplicate_submit(tmp_path:
         allow_local_reproduction=True,
     )
     adapter = FakeCTFdAdapter()
-    workflow = AutonomousWorkflow(settings, adapter)
+    workflow = AutonomousWorkflow(
+        settings, adapter, terminal_renderer=FakeTerminalRenderer()
+    )
     controller = workflow.controller()
     context = controller.create_run(
         "https://ctf.test/challenges/7", auto_submit=True, writeup=True
@@ -167,7 +206,9 @@ async def test_completed_submission_is_not_repeated_after_resume_window(tmp_path
         allow_local_reproduction=True,
     )
     adapter = FakeCTFdAdapter()
-    workflow = AutonomousWorkflow(settings, adapter)
+    workflow = AutonomousWorkflow(
+        settings, adapter, terminal_renderer=FakeTerminalRenderer()
+    )
     controller = workflow.controller()
     context = controller.create_run(
         "https://ctf.test/challenges/7", auto_submit=True, writeup=True
@@ -233,6 +274,7 @@ async def test_verified_dry_run_stops_cleanly_in_ready_state(tmp_path: Path) -> 
             allow_local_reproduction=True,
         ),
         adapter,
+        terminal_renderer=FakeTerminalRenderer(),
     )
     context = workflow.controller().create_run(
         "https://ctf.test/challenges/7", auto_submit=False, writeup=False
@@ -335,3 +377,41 @@ async def test_auth_required_submission_returns_to_auth_without_budget_cost(
     assert outcome.target is RunState.AUTHENTICATE
     assert context.store.submission_count(context.record.run_id) == 0
     assert context.store.pending_submission(context.record.run_id) is None
+
+
+@pytest.mark.asyncio
+async def test_evidence_records_terminal_capture_failure_without_fake_png(
+    tmp_path: Path,
+) -> None:
+    adapter = FakeCTFdAdapter()
+    workflow = AutonomousWorkflow(
+        Settings(backend="static", runs_dir=tmp_path / "runs"),
+        adapter,
+        terminal_renderer=HtmlOnlyTerminalRenderer(),
+    )
+    context = workflow.controller().create_run(
+        "https://ctf.test/challenges/12", auto_submit=True, writeup=True
+    )
+    context.values["challenge"] = await adapter.fetch_challenge(
+        "https://ctf.test/challenges/12"
+    )
+    context.values["candidate"] = FlagCandidate(
+        value="flag{evidence_failure}",
+        source_artifact="files/payload.txt",
+        source_location="line 1",
+        derivation=["fixture"],
+        solver_command="python3 solve.py",
+        format_match=True,
+        provenance_verified=True,
+        replay_verified=True,
+        independent_verified=True,
+        submission_allowed=True,
+    )
+
+    with pytest.raises(RuntimeError, match="terminal screenshot failed"):
+        await workflow.evidence(context)
+
+    evidence_dir = context.record.run_dir / "evidence"
+    assert not (evidence_dir / "02-exploit-proof.png").exists()
+    manifest = json.loads((evidence_dir / "manifest.json").read_text())
+    assert any(event["stage"] == "EVIDENCE_FAILURE" for event in manifest["events"])

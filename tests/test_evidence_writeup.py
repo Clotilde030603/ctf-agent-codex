@@ -60,9 +60,27 @@ def test_manifest_hashes_and_writeup_validation(tmp_path: Path) -> None:
         media_type="text/html",
         source="terminal",
         redacted=False,
+        producer="terminal-renderer",
+        command="python3 solve.py",
+        exit_code=0,
+        model="none",
+        tool="local-python",
+        event_id="verify-1",
+    )
+    manifest.add_capture_failure(
+        "accepted-screenshot",
+        stage="EVIDENCE",
+        reason="playwright-unavailable",
+        producer="platform-adapter",
+        tool="playwright",
+        event_id="capture-accepted",
     )
     manifest.add_event("VERIFY", "flag replay succeeded", flag="flag{verified}", accepted=True)
     manifest.save(evidence_dir / "manifest.json")
+    loaded_manifest = EvidenceManifest.load(evidence_dir / "manifest.json")
+    assert loaded_manifest.entries[0].producer == "terminal-renderer"
+    assert loaded_manifest.entries[0].command == "python3 solve.py"
+    assert loaded_manifest.failures[0].reason == "playwright-unavailable"
 
     (run_dir / "challenge.json").write_text(
         json.dumps(
@@ -120,3 +138,32 @@ def test_validator_rejects_unsupported_flag_claim(tmp_path: Path) -> None:
 
     assert not result.ok
     assert any("unsupported" in error for error in result.errors)
+
+
+def test_manifest_loads_legacy_without_failures_or_producer(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "run_id": "legacy",
+                "entries": [
+                    {
+                        "label": "old",
+                        "path": "evidence/old.html",
+                        "sha256": "abc",
+                        "media_type": "text/html",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                    }
+                ],
+                "events": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = EvidenceManifest.load(manifest_path)
+
+    assert manifest.run_id == "legacy"
+    assert manifest.failures == []
+    assert manifest.entries[0].producer is None

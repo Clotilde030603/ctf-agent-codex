@@ -70,6 +70,7 @@ def test_readme_cli_examples_match_typer_help() -> None:
             "--runs-dir",
             "--allow-private-host",
             "--allow-local-reproduction",
+            "--redact-flag",
         ),
         "resume": ("--runs-dir", "--challenge-url"),
         "benchmark": (),

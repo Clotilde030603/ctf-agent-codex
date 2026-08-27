@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
+from html import escape
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ctf_agent.evidence.manifest import EvidenceManifest
+from ctf_agent.evidence.provenance import build_provenance_index, save_provenance_index
 from ctf_agent.evidence.sanitizer import SecretSanitizer
 
 
@@ -22,6 +25,13 @@ class WriteupContext:
     evidence: EvidenceManifest
     solve_py: str
     generated_at: str
+
+
+@dataclass(frozen=True)
+class WriteupOutputs:
+    markdown_path: Path
+    html_path: Path
+    provenance_path: Path
 
 
 class WriteupGenerator:
@@ -54,19 +64,86 @@ class WriteupGenerator:
             generated_at=datetime.now(UTC).replace(microsecond=0).isoformat(),
         )
 
-    def generate(self, run_dir: Path, output: Path | None = None) -> Path:
+    def generate(
+        self, run_dir: Path, output: Path | None = None, *, redact_flags: bool = False
+    ) -> Path:
         context = self.build_context(run_dir)
-        markdown = self.render(context)
+        markdown = self.render(context, redact_flags=redact_flags)
+        if redact_flags:
+            flag = self._select_verified_flag(
+                context.events, context.evidence, context.challenge
+            )
+            markdown = self._redact_flag_text(markdown, flag, True)
         sanitized = self._sanitizer.sanitize(markdown).text
         output_path = output or run_dir / "writeup.md"
         output_path.write_text(sanitized, encoding="utf-8")
         return output_path
 
-    def render(self, context: WriteupContext) -> str:
+    def generate_all(self, run_dir: Path, *, redact_flags: bool = True) -> WriteupOutputs:
+        context = self.build_context(run_dir)
+        markdown_path = run_dir / "writeup.md"
+        html_path = run_dir / "writeup.html"
+        provenance_path = run_dir / "provenance.json"
+
+        markdown = self.render(context, redact_flags=redact_flags)
+        html = self.render_html(context, redact_flags=redact_flags)
+        flag = self._select_verified_flag(context.events, context.evidence, context.challenge)
+        if redact_flags:
+            markdown = self._redact_flag_text(markdown, flag, True)
+            html = self._redact_flag_text(html, flag, True)
+        markdown_path.write_text(self._sanitizer.sanitize(markdown).text, encoding="utf-8")
+        html_path.write_text(
+            html,
+            encoding="utf-8",
+        )
+
+        flag_reference = self._flag_reference(flag, redact_flags=redact_flags)
+        source_files = [
+            run_dir / "challenge.json",
+            run_dir / "triage.json",
+            run_dir / "hypotheses.json",
+            run_dir / "events.jsonl",
+            run_dir / "evidence" / "manifest.json",
+        ]
+        index = build_provenance_index(
+            context.evidence,
+            root=run_dir,
+            source_files=source_files,
+            generated_outputs=[
+                (markdown_path, "text/markdown", "writeup-markdown"),
+                (html_path, "text/html", "writeup-html"),
+            ],
+            flag_reference=flag_reference,
+            metadata={
+                "generator": "ctf_agent.writeup.WriteupGenerator",
+                "redact_flags": redact_flags,
+            },
+        )
+        index["path"] = provenance_path.relative_to(run_dir).as_posix()
+        index = self._redact_provenance(index, flag, flag_reference, redact_flags)
+        save_provenance_index(index, provenance_path)
+        return WriteupOutputs(markdown_path, html_path, provenance_path)
+
+    def render(self, context: WriteupContext, *, redact_flags: bool = False) -> str:
         try:
-            from jinja2 import Environment, FileSystemLoader, select_autoescape
+            env = self._jinja_environment()
         except ModuleNotFoundError:
-            return self._render_without_jinja(context)
+            return self._render_without_jinja(context, redact_flags=redact_flags)
+
+        template = env.get_template("writeup.md.j2")
+        return str(template.render(**self._template_vars(context, redact_flags=redact_flags)))
+
+    def render_html(self, context: WriteupContext, *, redact_flags: bool = True) -> str:
+        try:
+            env = self._jinja_environment()
+            template = env.get_template("writeup.html.j2")
+            return str(template.render(**self._template_vars(context, redact_flags=redact_flags)))
+        except ModuleNotFoundError:
+            markdown = self._render_without_jinja(context, redact_flags=redact_flags)
+            return self._html_shell(markdown)
+
+    def _jinja_environment(self) -> Any:
+        from jinja2 import Environment, FileSystemLoader, select_autoescape
 
         env = Environment(
             loader=FileSystemLoader(str(self._template_dir)),
@@ -75,15 +152,17 @@ class WriteupGenerator:
             lstrip_blocks=True,
         )
         env.filters["json"] = lambda value: json.dumps(value, indent=2, sort_keys=True)
-        template = env.get_template("writeup.md.j2")
-        return str(template.render(**self._template_vars(context)))
+        return env
 
-    def _render_without_jinja(self, context: WriteupContext) -> str:
-        variables = self._template_vars(context)
+    def _render_without_jinja(self, context: WriteupContext, *, redact_flags: bool) -> str:
+        variables = self._template_vars(context, redact_flags=redact_flags)
         evidence_lines = "\n".join(
             f"- `{entry.path}` ({entry.label}, sha256 `{entry.sha256}`)"
             for entry in context.evidence.entries
         ) or "- No evidence files recorded."
+        failure_lines = "\n".join(
+            f"- {failure.label}: {failure.reason}" for failure in context.evidence.failures
+        ) or "- No capture failures recorded."
         event_lines = "\n".join(
             f"- {event.get('stage', event.get('state', 'UNKNOWN'))}: "
             f"{event.get('message', event.get('type', event))}"
@@ -117,11 +196,17 @@ Generated: {context.generated_at}
 
 ## Verified Flag
 
-`{variables["flag"]}`
+`{variables["display_flag"]}`
+
+Flag reference: `{variables["flag_reference"]}`
 
 ## Evidence
 
 {evidence_lines}
+
+## Capture Failures
+
+{failure_lines}
 
 ## Timeline
 
@@ -136,19 +221,25 @@ python3 solve.py
 ```
 
 ```python
-{context.solve_py.strip()}
+{variables["display_solve_py"]}
 ```
 """
 
-    def _template_vars(self, context: WriteupContext) -> dict[str, Any]:
+    def _template_vars(self, context: WriteupContext, *, redact_flags: bool) -> dict[str, Any]:
         challenge = context.challenge
         flag = self._select_verified_flag(context.events, context.evidence, challenge)
+        flag_reference = self._flag_reference(flag, redact_flags=redact_flags)
+        display_flag = flag_reference.get("display", flag)
         return {
             "title": challenge.get("title") or challenge.get("name") or context.run_dir.name,
             "category": challenge.get("category", "unknown"),
             "points": challenge.get("points", challenge.get("score", "unknown")),
             "url": challenge.get("url", ""),
             "flag": flag,
+            "display_flag": display_flag,
+            "flag_hash": flag_reference.get("sha256", ""),
+            "flag_reference": flag_reference.get("reference", ""),
+            "redact_flags": redact_flags,
             "summary": challenge.get("description", "No challenge description was recorded."),
             "challenge": challenge,
             "triage": context.triage,
@@ -156,8 +247,58 @@ python3 solve.py
             "events": context.events,
             "evidence": context.evidence,
             "solve_py": context.solve_py,
+            "display_solve_py": self._redact_flag_text(context.solve_py, flag, redact_flags),
             "generated_at": context.generated_at,
         }
+
+    def _html_shell(self, markdown: str) -> str:
+        return (
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<title>CTF writeup</title></head><body><pre>"
+            f"{escape(markdown)}"
+            "</pre></body></html>\n"
+        )
+
+    def _flag_reference(self, flag: str, *, redact_flags: bool) -> dict[str, str]:
+        if flag == "not recorded":
+            return {"display": flag, "reference": "not-recorded", "sha256": ""}
+        digest = sha256(flag.encode()).hexdigest()
+        if not redact_flags:
+            return {"display": flag, "reference": f"flag-sha256:{digest}", "sha256": digest}
+        return {
+            "display": f"[REDACTED flag:{digest[:12]}]",
+            "reference": f"flag-sha256:{digest}",
+            "sha256": digest,
+        }
+
+    def _redact_flag_text(self, value: str, flag: str, redact_flags: bool) -> str:
+        if not redact_flags or flag == "not recorded":
+            return value
+        return value.replace(flag, self._flag_reference(flag, redact_flags=True)["display"])
+
+    def _redact_provenance(
+        self,
+        value: dict[str, Any],
+        flag: str,
+        flag_reference: dict[str, str],
+        redact_flags: bool,
+    ) -> dict[str, Any]:
+        if not redact_flags or flag == "not recorded":
+            return value
+        replacement = flag_reference.get("reference", "[REDACTED flag]")
+        return cast(dict[str, Any], self._replace_raw_flag(value, flag, replacement))
+
+    def _replace_raw_flag(self, value: Any, flag: str, replacement: str) -> Any:
+        if isinstance(value, str):
+            return value.replace(flag, replacement)
+        if isinstance(value, list):
+            return [self._replace_raw_flag(item, flag, replacement) for item in value]
+        if isinstance(value, dict):
+            return {
+                str(key): self._replace_raw_flag(item, flag, replacement)
+                for key, item in value.items()
+            }
+        return value
 
     def _select_verified_flag(
         self, events: list[dict[str, Any]], evidence: EvidenceManifest, challenge: dict[str, Any]
