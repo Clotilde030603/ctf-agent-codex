@@ -125,6 +125,8 @@ class Controller:
 
     async def execute(self, context: RunContext) -> RunRecord:
         steps = 0
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.settings.total_run_timeout_seconds
         while context.record.state not in {
             RunState.DONE,
             RunState.READY,
@@ -139,6 +141,14 @@ class Controller:
                 )
                 return context.record
             state = context.record.state
+            remaining_seconds = deadline - loop.time()
+            if remaining_seconds <= 0:
+                context.record = context.store.transition(
+                    context.record.run_id,
+                    RunState.FAILED,
+                    "total run timeout exhausted",
+                )
+                return context.record
             handler = self.handlers.get(state)
             if handler is None:
                 raise RuntimeError(f"no handler registered for {state}")
@@ -150,7 +160,31 @@ class Controller:
                 state=state.value,
             )
             try:
-                outcome = await handler(context)
+                handler_task: asyncio.Future[StateOutcome] = asyncio.ensure_future(
+                    handler(context)
+                )
+                done, _pending = await asyncio.wait(
+                    {handler_task}, timeout=remaining_seconds
+                )
+                if not done:
+                    handler_task.cancel()
+                    await asyncio.gather(handler_task, return_exceptions=True)
+                    context.ledger.append(
+                        context.record.run_id,
+                        "run.timeout",
+                        {
+                            "state": state.value,
+                            "timeout_seconds": self.settings.total_run_timeout_seconds,
+                        },
+                        state=state.value,
+                    )
+                    context.record = context.store.transition(
+                        context.record.run_id,
+                        RunState.FAILED,
+                        "total run timeout exhausted",
+                    )
+                    return context.record
+                outcome = handler_task.result()
             except asyncio.CancelledError:
                 context.ledger.append(
                     context.record.run_id,

@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -71,3 +72,30 @@ def test_sensitive_url_query_is_redacted_from_state_and_events(tmp_path: Path) -
         challenge_url="https://ctf.test/challenges/7?token=secret-value&view=full",
     )
     assert resumed.values["challenge_url"].endswith("token=secret-value&view=full")
+
+
+@pytest.mark.asyncio
+async def test_controller_enforces_total_run_timeout(tmp_path: Path) -> None:
+    async def slow_handler(context: RunContext) -> StateOutcome:
+        await asyncio.sleep(0.1)
+        return StateOutcome(RunState.INGEST)
+
+    controller = Controller(
+        Settings(
+            runs_dir=tmp_path / "runs",
+            total_run_timeout_seconds=0.02,
+        ),
+        {RunState.AUTHENTICATE: slow_handler},
+    )
+    context = controller.create_run(
+        "https://ctf.test/challenges/slow", auto_submit=False, writeup=False
+    )
+
+    result = await controller.execute(context)
+
+    assert result.state is RunState.FAILED
+    assert result.last_error == "total run timeout exhausted"
+    assert any(
+        event["event_type"] == "run.timeout"
+        for event in context.ledger.list(result.run_id)
+    )
