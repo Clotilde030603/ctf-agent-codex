@@ -47,6 +47,8 @@ class PlatformAdapter(Protocol):
 
     async def capture_challenge(self, challenge: Challenge, destination: Path) -> Path | None: ...
 
+    async def capture_verdict(self, challenge: Challenge, destination: Path) -> Path | None: ...
+
 
 def challenge_from_mapping(data: Mapping[str, Any], *, fallback_url: str) -> Challenge:
     attachments = data.get("attachment_urls") or data.get("attachments") or data.get("files") or []

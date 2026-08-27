@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
+from ctf_agent.ingestion.browser import acquire_authenticated_storage, capture_scoped_page
 from ctf_agent.ingestion.downloader import download_attachments
 from ctf_agent.ingestion.session import ScopedAsyncSession
 from ctf_agent.platforms.base import (
@@ -22,15 +25,41 @@ from ctf_agent.scope import HostScope
 class CTFdPlatformAdapter(GenericPlatformAdapter):
     platform = "ctfd"
 
-    def __init__(self, base_url: str, session: ScopedAsyncSession | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        session: ScopedAsyncSession | None = None,
+        *,
+        browser_storage_state: Path | None = None,
+        allow_private_hosts: bool = False,
+        request_observer: Callable[[Mapping[str, Any]], None] | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
-        scope = session.scope if session else HostScope.from_url(base_url, allow_private_hosts=True)
-        super().__init__(scope=scope, session=session or ScopedAsyncSession(scope))
+        self.browser_storage_state = browser_storage_state
+        scope = session.scope if session else HostScope.from_url(
+            base_url, allow_private_hosts=allow_private_hosts
+        )
+        super().__init__(
+            scope=scope,
+            session=session or ScopedAsyncSession(scope, request_observer=request_observer),
+        )
 
     async def authenticate(self) -> AuthSession:
         response = await self.session.get(urljoin(self.base_url + "/", "api/v1/users/me"))
         if response.status_code == 200:
             return AuthSession(authenticated=True, headers={"x-platform": self.platform})
+        if self.browser_storage_state is not None:
+            await acquire_authenticated_storage(
+                urljoin(self.base_url + "/", "login"), self.browser_storage_state
+            )
+            self.session.import_playwright_storage_state(self.browser_storage_state)
+            response = await self.session.get(urljoin(self.base_url + "/", "api/v1/users/me"))
+            if response.status_code == 200:
+                return AuthSession(
+                    authenticated=True,
+                    headers={"x-platform": self.platform},
+                    storage_state=self.browser_storage_state,
+                )
         return AuthSession(authenticated=False, headers={"x-platform": self.platform})
 
     async def fetch_challenge(self, url: str) -> Challenge:
@@ -50,6 +79,7 @@ class CTFdPlatformAdapter(GenericPlatformAdapter):
         challenge.attachment_urls = [
             _absolute_file_url(self.base_url, item) for item in challenge.attachment_urls
         ]
+        self._expand_declared_scope(challenge)
         return challenge
 
     async def download_attachments(self, challenge: Challenge, destination: Path) -> list[Artifact]:
@@ -75,6 +105,36 @@ class CTFdPlatformAdapter(GenericPlatformAdapter):
         except ValueError:
             payload = response.text
         return parse_submission_verdict(payload, status_code=response.status_code)
+
+    async def capture_challenge(self, challenge: Challenge, destination: Path) -> Path | None:
+        if self.browser_storage_state is None:
+            return None
+        return await capture_scoped_page(
+            challenge.url,
+            destination,
+            storage_state=self.browser_storage_state,
+            selector="main, .challenge, [data-challenge-id]",
+        )
+
+    async def capture_verdict(self, challenge: Challenge, destination: Path) -> Path | None:
+        if self.browser_storage_state is None:
+            return None
+        return await capture_scoped_page(
+            challenge.url,
+            destination,
+            storage_state=self.browser_storage_state,
+            selector="main, .challenge, .solved, .alert-success",
+        )
+
+    def _expand_declared_scope(self, challenge: Challenge) -> None:
+        declared = [*challenge.attachment_urls, *challenge.service_hosts]
+        self.scope = HostScope.from_url(
+            challenge.url,
+            extra_hosts=declared,
+            allow_subdomains=self.scope.allow_subdomains,
+            allow_private_hosts=self.scope.allow_private_hosts,
+        )
+        self.session.scope = self.scope
 
 
 def extract_ctfd_challenge_id(url: str) -> int | None:

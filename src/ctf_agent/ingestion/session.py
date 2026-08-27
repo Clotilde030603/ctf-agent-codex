@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,10 +28,12 @@ class ScopedAsyncSession:
         *,
         config: SessionConfig | None = None,
         client: httpx.AsyncClient | None = None,
+        request_observer: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> None:
         self.scope = scope
         self.config = config or SessionConfig()
         self._owned_client = client is None
+        self._request_observer = request_observer
         headers = {"User-Agent": self.config.user_agent, **self.config.default_headers}
         self.client = client or httpx.AsyncClient(
             timeout=self.config.timeout_seconds,
@@ -63,6 +65,15 @@ class ScopedAsyncSession:
         current_url = url
         while True:
             response = await self.client.request(method, current_url, **kwargs)
+            if self._request_observer is not None:
+                self._request_observer(
+                    {
+                        "method": method,
+                        "url": str(response.request.url),
+                        "status_code": response.status_code,
+                        "redirect": response.status_code in {301, 302, 303, 307, 308},
+                    }
+                )
             if response.status_code not in {301, 302, 303, 307, 308}:
                 return response
             location = response.headers.get("location")
@@ -107,6 +118,17 @@ class ScopedAsyncSession:
             return
         payload = json.loads(self.config.cookies_path.read_text(encoding="utf-8"))
         for cookie in payload:
+            self.client.cookies.set(
+                cookie["name"],
+                cookie["value"],
+                domain=cookie.get("domain"),
+                path=cookie.get("path", "/"),
+            )
+
+    def import_playwright_storage_state(self, path: Path) -> None:
+        """Import cookies without persisting local/session storage in the HTTP layer."""
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        for cookie in payload.get("cookies", []):
             self.client.cookies.set(
                 cookie["name"],
                 cookie["value"],

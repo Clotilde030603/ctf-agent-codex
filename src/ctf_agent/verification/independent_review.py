@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .candidate import FlagCandidate
-from .flag_gate import FlagGate, SubmissionBudget
+from .flag_gate import FlagGate, FlagPolicy, SubmissionBudget
 from .replay import ReplayResult, replay_solver
 
 
@@ -49,7 +49,7 @@ class ReplayVerifier:
         replay = replay_solver(
             self.solver_path,
             expected_flag=decision.candidate.normalized_value,
-            flag_regex=self.flag_regex or self.gate.policy.regex,
+            flag_regex=self.flag_regex or FlagPolicy.from_schema(self.gate.policy).regex,
             timeout_seconds=self.timeout_seconds,
         )
         if not replay.success:

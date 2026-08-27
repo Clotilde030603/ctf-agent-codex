@@ -8,7 +8,6 @@ from pathlib import Path
 
 from ctf_agent.schemas import RunRecord, RunState
 
-
 FORWARD_TRANSITIONS: dict[RunState, set[RunState]] = {
     RunState.AUTHENTICATE: {RunState.INGEST, RunState.FAILED},
     RunState.INGEST: {RunState.TRIAGE, RunState.FAILED},
@@ -16,7 +15,7 @@ FORWARD_TRANSITIONS: dict[RunState, set[RunState]] = {
     RunState.PLAN: {RunState.SOLVE, RunState.FAILED},
     RunState.SOLVE: {RunState.VERIFY, RunState.PLAN, RunState.FAILED},
     RunState.VERIFY: {RunState.SUBMIT, RunState.SOLVE, RunState.PLAN, RunState.FAILED},
-    RunState.SUBMIT: {RunState.EVIDENCE, RunState.PLAN, RunState.FAILED},
+    RunState.SUBMIT: {RunState.EVIDENCE, RunState.PLAN, RunState.TRIAGE, RunState.FAILED},
     RunState.EVIDENCE: {RunState.WRITEUP, RunState.REPRODUCE, RunState.FAILED},
     RunState.WRITEUP: {RunState.REPRODUCE, RunState.SOLVE, RunState.FAILED},
     RunState.REPRODUCE: {RunState.DONE, RunState.WRITEUP, RunState.SOLVE, RunState.FAILED},
@@ -137,7 +136,12 @@ class StateStore:
         with self._connect() as connection:
             connection.execute(
                 "INSERT OR REPLACE INTO checkpoints VALUES(?,?,?,?)",
-                (run_id, task_key, datetime.now(UTC).isoformat(), str(result_path) if result_path else None),
+                (
+                    run_id,
+                    task_key,
+                    datetime.now(UTC).isoformat(),
+                    str(result_path) if result_path else None,
+                ),
             )
 
     def is_complete(self, run_id: str, task_key: str) -> bool:
@@ -172,5 +176,13 @@ class StateStore:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT COUNT(*) AS count FROM submissions WHERE run_id=?", (run_id,)
+            ).fetchone()
+        return int(row["count"])
+
+    def submission_count_for_verdict(self, run_id: str, verdict: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM submissions WHERE run_id=? AND verdict=?",
+                (run_id, verdict),
             ).fetchone()
         return int(row["count"])

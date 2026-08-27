@@ -39,6 +39,8 @@ async def test_controller_owns_all_state_transitions_and_resumes(tmp_path: Path)
     resumed = controller.resume_run(result.run_id)
     assert resumed.record.state is RunState.DONE
     transitions = [
-        event for event in resumed.ledger.list(result.run_id) if event["event_type"] == "state.transition"
+        event
+        for event in resumed.ledger.list(result.run_id)
+        if event["event_type"] == "state.transition"
     ]
     assert len(transitions) == 10

@@ -73,6 +73,7 @@ class FlagCandidate:
 
         data = _as_mapping(value)
         raw_provenance = data.get("provenance") or data.get("evidence") or ()
+        provenance_values: tuple[Any, ...]
         if isinstance(raw_provenance, Mapping):
             provenance_values = (raw_provenance,)
         else:

@@ -28,4 +28,5 @@ class Settings(BaseSettings):
     rate_limit_per_second: float = Field(default=2, gt=0, le=50)
     codex_binary: str = "codex"
     browser_storage_state: Path | None = None
+    allow_private_hosts: bool = False
     docker_image: str = "python:3.12-slim"

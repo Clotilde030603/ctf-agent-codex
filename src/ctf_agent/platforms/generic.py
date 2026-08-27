@@ -52,3 +52,6 @@ class GenericPlatformAdapter:
 
     async def capture_challenge(self, challenge: Challenge, destination: Path) -> Path | None:
         return None
+
+    async def capture_verdict(self, challenge: Challenge, destination: Path) -> Path | None:
+        return None

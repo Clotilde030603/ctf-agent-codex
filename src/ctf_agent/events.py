@@ -54,11 +54,15 @@ class EventLedger:
         with self._lock, self._connect() as connection:
             try:
                 cursor = connection.execute(
-                    "INSERT INTO events(run_id,event_type,state,created_at,payload,idempotency_key) "
+                    "INSERT INTO events("
+                    "run_id,event_type,state,created_at,payload,idempotency_key"
+                    ") "
                     "VALUES(?,?,?,?,?,?)",
                     (run_id, event_type, state, created_at, encoded, idempotency_key),
                 )
-                event_id = int(cursor.lastrowid)
+                if cursor.lastrowid is None:
+                    raise RuntimeError("SQLite did not return an event id")
+                event_id = cursor.lastrowid
             except sqlite3.IntegrityError:
                 row = connection.execute(
                     "SELECT id FROM events WHERE run_id=? AND idempotency_key=?",

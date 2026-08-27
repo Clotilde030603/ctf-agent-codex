@@ -38,7 +38,11 @@ async def run_benchmark(manifest: Path) -> dict[str, Any]:
         stdout, stderr = await process.communicate()
         elapsed = time.monotonic() - started
         expected = str(challenge.get("expected_flag", ""))
-        solved = process.returncode == 0 and expected and expected in stdout.decode(errors="replace")
+        solved = (
+            process.returncode == 0
+            and bool(expected)
+            and expected in stdout.decode(errors="replace")
+        )
         results.append(
             {
                 "id": challenge.get("id"),
