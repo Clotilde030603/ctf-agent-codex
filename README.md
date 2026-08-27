@@ -252,6 +252,20 @@ Solve, submit, and write the report:
 ctf-agent solve "<challenge-url>" --auto-submit --writeup
 ```
 
+Select the production model path and user-provided model identifiers:
+
+```bash
+ctf-agent solve "<challenge-url>" \
+  --backend codex \
+  --planner-model "<planner-model>" \
+  --solver-model "<solver-model>" \
+  --reviewer-model "<reviewer-model>" \
+  --reasoning-effort high \
+  --max-workers 3 \
+  --auto-submit \
+  --writeup
+```
+
 Disable the Markdown write-up while keeping the Accepted/evidence/reproduction path:
 
 ```bash
@@ -412,6 +426,7 @@ The `.env` file is Git-ignored. Never put a real flag, cookie, password, or API 
 
 | Variable | Default |
 | --- | --- |
+| `CTF_BACKEND` | `codex` |
 | `CTF_PLANNER_MODEL` | `gpt-5.6-sol` |
 | `CTF_SOLVER_MODEL` | `gpt-5.6-sol` |
 | `CTF_VERIFIER_MODEL` | `gpt-5.6-sol` |
@@ -419,6 +434,11 @@ The `.env` file is Git-ignored. Never put a real flag, cookie, password, or API 
 | `CTF_SOLVER_EFFORT` | `xhigh` |
 | `CTF_VERIFIER_EFFORT` | `high` |
 | `CTF_CODEX_BINARY` | `codex` |
+| `CTF_MODEL_TIMEOUT_SECONDS` | `180` |
+| `CTF_MODEL_CALL_BUDGET` | `20` |
+| `CTF_MAX_MODEL_CONTEXT_BYTES` | `524288` |
+| `CTF_MAX_WORKERS` | `3` |
+| `CTF_ALLOW_STATIC_FALLBACK` | `true` |
 
 These settings are implemented and centralized, but they are not yet wired into the default deterministic workflow. Model-driven category solvers and cost reporting remain roadmap work. Model availability and reasoning-effort support depend on the user's Codex account and current Codex CLI.
 

@@ -252,6 +252,20 @@ ctf-agent benchmark --help
 ctf-agent solve "<challenge-url>" --auto-submit --writeup
 ```
 
+production model 경로와 사용자 제공 model identifier 지정:
+
+```bash
+ctf-agent solve "<challenge-url>" \
+  --backend codex \
+  --planner-model "<planner-model>" \
+  --solver-model "<solver-model>" \
+  --reviewer-model "<reviewer-model>" \
+  --reasoning-effort high \
+  --max-workers 3 \
+  --auto-submit \
+  --writeup
+```
+
 Accepted 증적과 재현은 수행하되 Markdown 문서는 생략:
 
 ```bash
@@ -412,6 +426,7 @@ cp .env.example .env
 
 | 변수 | 기본값 |
 | --- | --- |
+| `CTF_BACKEND` | `codex` |
 | `CTF_PLANNER_MODEL` | `gpt-5.6-sol` |
 | `CTF_SOLVER_MODEL` | `gpt-5.6-sol` |
 | `CTF_VERIFIER_MODEL` | `gpt-5.6-sol` |
@@ -419,6 +434,11 @@ cp .env.example .env
 | `CTF_SOLVER_EFFORT` | `xhigh` |
 | `CTF_VERIFIER_EFFORT` | `high` |
 | `CTF_CODEX_BINARY` | `codex` |
+| `CTF_MODEL_TIMEOUT_SECONDS` | `180` |
+| `CTF_MODEL_CALL_BUDGET` | `20` |
+| `CTF_MAX_MODEL_CONTEXT_BYTES` | `524288` |
+| `CTF_MAX_WORKERS` | `3` |
+| `CTF_ALLOW_STATIC_FALLBACK` | `true` |
 
 설정은 중앙화되어 있지만 기본 deterministic workflow에는 아직 연결되지 않았습니다. model 기반 category solver와 cost report는 roadmap 항목입니다. 사용 가능한 model과 reasoning effort는 사용자 Codex 계정과 현재 Codex CLI 환경에 따라 달라집니다.
 

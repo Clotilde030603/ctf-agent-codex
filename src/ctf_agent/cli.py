@@ -19,6 +19,12 @@ app = typer.Typer(no_args_is_help=True, help="Deterministic autonomous CTF agent
 @app.command()
 def solve(
     url: Annotated[str, typer.Argument(help="CTF challenge URL")],
+    backend: Annotated[str, typer.Option("--backend")] = "codex",
+    planner_model: Annotated[str | None, typer.Option("--planner-model")] = None,
+    solver_model: Annotated[str | None, typer.Option("--solver-model")] = None,
+    reviewer_model: Annotated[str | None, typer.Option("--reviewer-model")] = None,
+    reasoning_effort: Annotated[str | None, typer.Option("--reasoning-effort")] = None,
+    max_workers: Annotated[int, typer.Option("--max-workers", min=1, max=3)] = 3,
     auto_submit: Annotated[bool, typer.Option("--auto-submit")] = False,
     writeup: Annotated[bool, typer.Option("--writeup/--no-writeup")] = True,
     runs_dir: Annotated[Path, typer.Option("--runs-dir")] = Path("runs"),
@@ -28,10 +34,22 @@ def solve(
     ] = False,
 ) -> None:
     """Create and execute a new challenge run."""
-    settings = Settings(
-        runs_dir=runs_dir,
-        allow_private_hosts=allow_private_host,
-        allow_local_reproduction=allow_local_reproduction,
+    defaults = Settings()
+    settings = Settings.model_validate(
+        {
+            **defaults.model_dump(),
+            "backend": backend,
+            "planner_model": planner_model or defaults.planner_model,
+            "solver_model": solver_model or defaults.solver_model,
+            "verifier_model": reviewer_model or defaults.verifier_model,
+            "planner_effort": reasoning_effort or defaults.planner_effort,
+            "solver_effort": reasoning_effort or defaults.solver_effort,
+            "verifier_effort": reasoning_effort or defaults.verifier_effort,
+            "max_workers": max_workers,
+            "runs_dir": runs_dir,
+            "allow_private_hosts": allow_private_host,
+            "allow_local_reproduction": allow_local_reproduction,
+        }
     )
     workflow = AutonomousWorkflow(settings)
     controller = workflow.controller()

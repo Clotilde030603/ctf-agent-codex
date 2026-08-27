@@ -43,7 +43,9 @@ class FakeSpecialist:
         return SpecialistResult(
             hypothesis_id=hypothesis.id,
             status=self.status,
-            facts=[f"{self.name} handled {hypothesis.id}"],
+            facts=[f"{self.name} handled {hypothesis.id}"]
+            if self.status == "confirmed"
+            else [],
             flag_candidates=[
                 FlagCandidate(
                     value=self.flag,
@@ -54,7 +56,34 @@ class FakeSpecialist:
             ]
             if self.flag
             else [],
+            next_action=self.name,
         )
+
+
+class RaisingSpecialist:
+    name = "raising"
+
+    def supports(self, category: str) -> bool:
+        return True
+
+    async def solve(
+        self, hypothesis: Hypothesis, context: dict[str, object]
+    ) -> SpecialistResult:
+        raise RuntimeError("lane exploded")
+
+
+def _hypothesis_payload(identifier: str, claim: str) -> dict[str, object]:
+    return {
+        "id": identifier,
+        "claim": claim,
+        "supporting_evidence": [],
+        "expected_signal": "new evidence",
+        "cost": "low",
+        "confidence": 0.5,
+        "required_tools": [],
+        "kill_condition": "no progress",
+        "success_condition": "verified candidate",
+    }
 
 
 def test_model_planner_caps_hypotheses_at_three() -> None:
@@ -63,10 +92,10 @@ def test_model_planner_caps_hypotheses_at_three() -> None:
             json.dumps(
                 {
                     "hypotheses": [
-                        {"id": "h1", "claim": "web"},
-                        {"id": "h2", "claim": "rev"},
-                        {"id": "h3", "claim": "crypto"},
-                        {"id": "h4", "claim": "pwn"},
+                        _hypothesis_payload("h1", "web"),
+                        _hypothesis_payload("h2", "rev"),
+                        _hypothesis_payload("h3", "crypto"),
+                        _hypothesis_payload("h4", "pwn"),
                     ]
                 }
             )
@@ -114,7 +143,7 @@ def test_scheduler_runs_matching_specialists_concurrently() -> None:
 
     assert elapsed < 0.25
     assert result.stop_reason == "no_progress"
-    assert {item.facts[0].split()[0] for item in result.specialist_results} == {"web", "crypto"}
+    assert {item.next_action for item in result.specialist_results} == {"web", "crypto"}
 
 
 def test_scheduler_stops_on_solved_and_preserves_flag() -> None:
@@ -140,6 +169,34 @@ def test_scheduler_stops_on_solved_and_preserves_flag() -> None:
     assert result.solved is True
     assert result.stop_reason == "solved"
     assert result.accepted_flags == ("flag{ok}",)
+
+
+def test_scheduler_preserves_other_lane_when_one_raises() -> None:
+    scheduler = Scheduler(
+        planner=StaticHypothesisPlanner(
+            [
+                Hypothesis(
+                    id="h1",
+                    claim="lead",
+                    expected_signal="flag",
+                    cost="low",
+                    confidence=0.5,
+                    kill_condition="none",
+                    success_condition="flag",
+                )
+            ]
+        ),
+        specialists=(
+            RaisingSpecialist(),
+            FakeSpecialist("solver", status="confirmed", flag="flag{survives}"),
+        ),
+    )
+
+    result = asyncio.run(scheduler.run({}))
+
+    assert result.solved is True
+    assert result.accepted_flags == ("flag{survives}",)
+    assert any("lane exploded" in item.next_action for item in result.specialist_results)
 
 
 def test_scheduler_no_progress_cutoff_after_first_round() -> None:

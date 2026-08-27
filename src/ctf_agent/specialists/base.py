@@ -8,11 +8,11 @@ from ctf_agent.schemas import Hypothesis, SpecialistResult
 def progress_made(result: SpecialistResult) -> bool:
     return bool(
         result.status == "confirmed"
+        or result.facts
         or result.flag_candidates
         or result.artifacts
         or result.commands
         or result.reproduction_command
-        or result.next_action
     )
 
 

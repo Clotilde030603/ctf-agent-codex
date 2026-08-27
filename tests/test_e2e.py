@@ -98,6 +98,7 @@ class FakeCTFdAdapter:
 @pytest.mark.asyncio
 async def test_fake_ctfd_end_to_end_vertical_slice(tmp_path: Path) -> None:
     settings = Settings(
+        backend="static",
         runs_dir=tmp_path / "runs",
         tool_timeout_seconds=10,
         submission_budget=2,
@@ -133,6 +134,7 @@ async def test_fake_ctfd_end_to_end_vertical_slice(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_pending_submission_is_resolved_without_duplicate_submit(tmp_path: Path) -> None:
     settings = Settings(
+        backend="static",
         runs_dir=tmp_path / "runs",
         tool_timeout_seconds=10,
         submission_budget=2,
@@ -158,6 +160,7 @@ async def test_pending_submission_is_resolved_without_duplicate_submit(tmp_path:
 @pytest.mark.asyncio
 async def test_completed_submission_is_not_repeated_after_resume_window(tmp_path: Path) -> None:
     settings = Settings(
+        backend="static",
         runs_dir=tmp_path / "runs",
         tool_timeout_seconds=10,
         submission_budget=2,
@@ -184,7 +187,11 @@ async def test_completed_submission_is_not_repeated_after_resume_window(tmp_path
 @pytest.mark.asyncio
 async def test_verification_rejection_returns_to_plan(tmp_path: Path) -> None:
     workflow = AutonomousWorkflow(
-        Settings(runs_dir=tmp_path / "runs", allow_local_reproduction=True),
+        Settings(
+            backend="static",
+            runs_dir=tmp_path / "runs",
+            allow_local_reproduction=True,
+        ),
         FakeCTFdAdapter(),
     )
     controller = workflow.controller()

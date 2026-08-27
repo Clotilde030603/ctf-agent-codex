@@ -11,6 +11,20 @@ from ctf_agent.specialists.base import Specialist, progress_made
 
 MAX_HYPOTHESES = 3
 
+HYPOTHESIS_RESPONSE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["hypotheses"],
+    "properties": {
+        "hypotheses": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": MAX_HYPOTHESES,
+            "items": Hypothesis.model_json_schema(),
+        }
+    },
+}
+
 
 def hypothesis_from_mapping(index: int, value: dict[str, Any]) -> Hypothesis:
     evidence = value.get("supporting_evidence")
@@ -85,6 +99,8 @@ class ModelHypothesisPlanner:
                     "kill_condition, and success_condition."
                 ),
                 context=context,
+                output_schema=HYPOTHESIS_RESPONSE_SCHEMA,
+                role="planner",
             )
         )
         try:
@@ -96,11 +112,13 @@ class ModelHypothesisPlanner:
         if not isinstance(raw_hypotheses, list):
             raise ModelBackendError("planner JSON must include a hypotheses list")
 
-        hypotheses = [
-            hypothesis_from_mapping(index, item)
-            for index, item in enumerate(raw_hypotheses[: self._max_hypotheses])
-            if isinstance(item, dict)
-        ]
+        try:
+            hypotheses = [
+                Hypothesis.model_validate(item)
+                for item in raw_hypotheses[: self._max_hypotheses]
+            ]
+        except (TypeError, ValueError) as exc:
+            raise ModelBackendError("planner hypotheses failed schema validation") from exc
         if not hypotheses:
             raise ModelBackendError("planner produced no valid hypotheses")
         return tuple(hypotheses)
@@ -170,9 +188,31 @@ class Scheduler:
             ]
             selected = matching or list(self.specialists)
             for specialist in selected:
-                tasks.append(asyncio.create_task(specialist.solve(hypothesis, context)))
+                tasks.append(
+                    asyncio.create_task(
+                        self._solve_lane(specialist, hypothesis, context)
+                    )
+                )
 
         results: list[SpecialistResult] = []
         for task in asyncio.as_completed(tasks):
             results.append(await task)
         return results
+
+    @staticmethod
+    async def _solve_lane(
+        specialist: Specialist,
+        hypothesis: Hypothesis,
+        context: dict[str, object],
+    ) -> SpecialistResult:
+        try:
+            return await specialist.solve(hypothesis, context)
+        except Exception as exc:
+            return SpecialistResult(
+                hypothesis_id=hypothesis.id,
+                status="inconclusive",
+                next_action=(
+                    f"{specialist.name} failed with {type(exc).__name__}: {exc}"
+                ),
+                confidence=0.0,
+            )

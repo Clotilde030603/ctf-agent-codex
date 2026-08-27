@@ -58,6 +58,12 @@ def test_readme_cli_examples_match_typer_help() -> None:
     expected = {
         "solve": (
             "--auto-submit",
+            "--backend",
+            "--planner-model",
+            "--solver-model",
+            "--reviewer-model",
+            "--reasoning-effort",
+            "--max-workers",
             "--writeup",
             "--no-writeup",
             "--runs-dir",

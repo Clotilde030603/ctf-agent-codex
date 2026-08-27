@@ -12,10 +12,12 @@ from urllib.parse import urlsplit
 from ctf_agent.config import Settings
 from ctf_agent.engine import Controller, RunContext, StateHandler, StateOutcome
 from ctf_agent.evidence import EvidenceManifest, TerminalRenderer
+from ctf_agent.models.base import ModelBackend, ModelBackendError
+from ctf_agent.models.factory import create_codex_backend
 from ctf_agent.platforms.base import PlatformAdapter
 from ctf_agent.platforms.ctfd import CTFdPlatformAdapter
 from ctf_agent.reproduction import reproduce_solver
-from ctf_agent.scheduler import Scheduler, StaticHypothesisPlanner
+from ctf_agent.scheduler import ModelHypothesisPlanner, Scheduler, StaticHypothesisPlanner
 from ctf_agent.schemas import (
     Challenge,
     FlagCandidate,
@@ -42,9 +44,16 @@ def _write_json(path: Path, value: object) -> None:
 
 
 class AutonomousWorkflow:
-    def __init__(self, settings: Settings, adapter: PlatformAdapter | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        adapter: PlatformAdapter | None = None,
+        *,
+        planner_backend: ModelBackend | None = None,
+    ) -> None:
         self.settings = settings
         self._adapter_override = adapter
+        self._planner_backend_override = planner_backend
         self.handlers: dict[RunState, StateHandler] = {
             RunState.AUTHENTICATE: self.authenticate,
             RunState.INGEST: self.ingest,
@@ -150,7 +159,7 @@ class AutonomousWorkflow:
             for item in triage_data.get("classification", {}).get("evidence", [])[:5]
             if isinstance(item, dict)
         ]
-        hypotheses = [
+        fallback_hypotheses = [
             Hypothesis(
                 id=f"H{index}",
                 claim=claim,
@@ -180,13 +189,77 @@ class AutonomousWorkflow:
                 ],
                 start=1,
             )
-        ]
+        ][: self.settings.max_hypotheses]
+        hypotheses = fallback_hypotheses
+        planner_source = "static"
+        if self.settings.backend == "codex":
+            request_count = sum(
+                event["event_type"] == "model.request"
+                for event in context.ledger.list(context.record.run_id)
+            )
+            if request_count >= self.settings.model_call_budget:
+                if not self.settings.allow_static_fallback:
+                    raise RuntimeError("model call budget exhausted before planning")
+                context.ledger.append(
+                    context.record.run_id,
+                    "model.fallback",
+                    {"role": "planner", "reason": "model call budget exhausted"},
+                    state=RunState.PLAN.value,
+                )
+            else:
+                planner = ModelHypothesisPlanner(
+                    self._planner_backend(context),
+                    max_hypotheses=self.settings.max_hypotheses,
+                )
+                context.ledger.append(
+                    context.record.run_id,
+                    "model.request",
+                    {
+                        "role": "planner",
+                        "model": self.settings.planner_model,
+                        "request_index": request_count + 1,
+                    },
+                    state=RunState.PLAN.value,
+                )
+                try:
+                    hypotheses = list(
+                        await planner.plan(self._planning_context(context, triage_data))
+                    )
+                except ModelBackendError as exc:
+                    context.ledger.append(
+                        context.record.run_id,
+                        "model.failure",
+                        {
+                            "role": "planner",
+                            "error_type": type(exc).__name__,
+                            "message": str(exc),
+                        },
+                        state=RunState.PLAN.value,
+                    )
+                    if not self.settings.allow_static_fallback:
+                        raise
+                else:
+                    planner_source = "model"
+                    context.ledger.append(
+                        context.record.run_id,
+                        "model.completed",
+                        {
+                            "role": "planner",
+                            "model": self.settings.planner_model,
+                            "hypothesis_count": len(hypotheses),
+                        },
+                        state=RunState.PLAN.value,
+                    )
         _write_json(
             context.record.run_dir / "hypotheses.json",
             [hypothesis.model_dump(mode="json") for hypothesis in hypotheses],
         )
         context.values["hypotheses"] = hypotheses
-        return StateOutcome(RunState.SOLVE, {"hypotheses": len(hypotheses)})
+        context.values["planner_source"] = planner_source
+        return StateOutcome(
+            RunState.SOLVE,
+            {"hypotheses": len(hypotheses), "planner_source": planner_source},
+        )
 
     async def solve(self, context: RunContext) -> StateOutcome:
         hypotheses = context.values.get("hypotheses")
@@ -506,6 +579,64 @@ class AutonomousWorkflow:
     @staticmethod
     def _load_json(path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
+
+    def _planner_backend(self, context: RunContext) -> ModelBackend:
+        if self._planner_backend_override is not None:
+            return self._planner_backend_override
+        return create_codex_backend(self.settings, "planner", context.record.run_dir)
+
+    def _planning_context(
+        self, context: RunContext, triage_data: dict[str, Any]
+    ) -> dict[str, object]:
+        files: list[dict[str, object]] = []
+        for item in triage_data.get("files", [])[:100]:
+            if not isinstance(item, dict):
+                continue
+            files.append(
+                {
+                    key: item.get(key)
+                    for key in (
+                        "relative_path",
+                        "size",
+                        "sha256",
+                        "mime",
+                        "magic",
+                        "entropy",
+                        "language",
+                        "parent_archive",
+                        "extraction_depth",
+                    )
+                }
+                | {
+                    "indicators": item.get("indicators", [])[:50],
+                    "tool_results": item.get("tool_results", [])[:20],
+                }
+            )
+        previous_events = [
+            {
+                "type": event["event_type"],
+                "state": event.get("state"),
+                "payload": event["payload"],
+            }
+            for event in context.ledger.list(context.record.run_id)
+            if event["event_type"]
+            in {
+                "state.error",
+                "flag.verification_failed",
+                "flag.submitted",
+                "model.failure",
+            }
+        ][-20:]
+        challenge = self._challenge(context)
+        return {
+            "run_id": context.record.run_id,
+            "challenge": challenge.model_dump(mode="json"),
+            "flag_policy": challenge.flag_policy.model_dump(mode="json"),
+            "service_hosts": challenge.service_hosts,
+            "classification": triage_data.get("classification", {}),
+            "files": files,
+            "previous_attempts_and_failures": previous_events,
+        }
 
     @staticmethod
     def _challenge_url(context: RunContext) -> str:

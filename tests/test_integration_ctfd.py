@@ -81,6 +81,7 @@ async def test_mock_ctfd_api_full_workflow(tmp_path: Path) -> None:
     client, adapter = fixture_adapter(submitted)
     workflow = AutonomousWorkflow(
         Settings(
+            backend="static",
             runs_dir=tmp_path / "runs",
             tool_timeout_seconds=5,
             allow_local_reproduction=True,
@@ -105,6 +106,7 @@ async def test_resume_from_ingest_checkpoint(tmp_path: Path) -> None:
     submitted: list[str] = []
     client, adapter = fixture_adapter(submitted)
     settings = Settings(
+        backend="static",
         runs_dir=tmp_path / "runs",
         tool_timeout_seconds=5,
         allow_local_reproduction=True,
