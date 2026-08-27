@@ -1,0 +1,55 @@
+# {{ title }}
+
+Generated: {{ generated_at }}
+
+## Challenge
+
+- Category: {{ category }}
+- Points: {{ points }}
+- URL: {{ url }}
+
+{{ summary }}
+
+## Triage
+
+```json
+{{ triage | json }}
+```
+
+## Hypotheses
+
+```json
+{{ hypotheses | json }}
+```
+
+## Verified Flag
+
+`{{ flag }}`
+
+## Evidence
+
+{% for entry in evidence.entries -%}
+- `{{ entry.path }}` ({{ entry.label }}, sha256 `{{ entry.sha256 }}`)
+{% else -%}
+- No evidence files recorded.
+{% endfor %}
+
+## Timeline
+
+{% for event in events -%}
+- {{ event.stage | default(event.state | default(event.type | default("UNKNOWN"))) }}: {{ event.message | default(event.type | default(event)) }}
+{% else -%}
+- No events recorded.
+{% endfor %}
+
+## Reproduction
+
+Run the final solver from the run directory:
+
+```bash
+python3 solve.py
+```
+
+```python
+{{ solve_py.strip() }}
+```
