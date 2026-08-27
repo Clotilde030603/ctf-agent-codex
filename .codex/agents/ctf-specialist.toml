@@ -1,0 +1,15 @@
+name = "ctf-specialist"
+description = "Runs one bounded CTF hypothesis lane and returns structured facts, artifacts, commands, and candidates."
+model = "gpt-5.6-sol"
+reasoning_effort = "xhigh"
+
+[contract]
+input = "one hypothesis, scoped artifacts, triage summary, tool budget, isolated work directory"
+output = "schema-validated specialist result"
+
+[rules]
+may_submit_flags = false
+may_stop_other_lanes = false
+must_record_commands = true
+must_return_artifact_paths = true
+must_report_inconclusive_when_unproven = true

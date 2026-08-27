@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ctf-agent-codex"
+version = "0.1.0"
+description = "Deterministic, resumable Codex-powered CTF solving agent"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+dependencies = [
+  "httpx==0.28.1",
+  "jinja2==3.1.6",
+  "pydantic==2.11.7",
+  "pydantic-settings==2.10.1",
+  "typer==0.16.0",
+]
+
+[project.optional-dependencies]
+browser = ["playwright==1.53.0"]
+dev = [
+  "mypy==1.16.1",
+  "pytest==8.4.1",
+  "pytest-asyncio==1.0.0",
+  "ruff==0.12.1",
+]
+
+[project.scripts]
+ctf-agent = "ctf_agent.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctf_agent"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC", "S"]
+ignore = ["S101", "S603", "S607"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["ctf_agent"]

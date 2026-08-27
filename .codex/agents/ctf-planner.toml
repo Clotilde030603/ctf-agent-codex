@@ -1,0 +1,15 @@
+name = "ctf-planner"
+description = "Creates bounded, independent CTF solving hypotheses from verified challenge and triage facts."
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
+[contract]
+input = "challenge metadata, triage summary, prior hypotheses, rejected candidates, available tools"
+output = "schema-validated hypotheses"
+max_hypotheses = 3
+
+[rules]
+may_submit_flags = false
+may_choose_state_transition = false
+must_reference_evidence = true
+must_include_kill_condition = true

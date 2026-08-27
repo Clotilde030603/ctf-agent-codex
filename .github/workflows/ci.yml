@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  docs-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate TOML configuration
+        run: |
+          python - <<'PY'
+          import pathlib
+          import tomllib
+
+          for path in pathlib.Path(".").glob(".codex/**/*.toml"):
+              with path.open("rb") as handle:
+                  tomllib.load(handle)
+              print(f"valid toml: {path}")
+          PY
+      - name: Check skill frontmatter
+        run: |
+          python - <<'PY'
+          import pathlib
+
+          for path in pathlib.Path("skills").glob("*/SKILL.md"):
+              text = path.read_text(encoding="utf-8")
+              if not text.startswith("---\n"):
+                  raise SystemExit(f"missing frontmatter: {path}")
+              head = text.split("---", 2)[1]
+              if "name:" not in head or "description:" not in head:
+                  raise SystemExit(f"incomplete frontmatter: {path}")
+              print(f"valid skill metadata: {path}")
+          PY
+      - name: Run package checks when implemented
+        run: |
+          if [ -f pyproject.toml ]; then
+            python -m pip install --upgrade pip
+            python -m pip install -e ".[dev]"
+            ruff check .
+            mypy src
+            pytest
+          else
+            echo "pyproject.toml not present yet; skipped package checks."
+          fi

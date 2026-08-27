@@ -1,0 +1,43 @@
+[project]
+name = "ctf-agent-codex"
+description = "Autonomous, scope-limited CTF solving agent controlled by a deterministic state machine."
+
+[security]
+default_network_policy = "challenge-scope-only"
+store_plaintext_credentials = false
+commit_session_artifacts = false
+auto_submit_requires_verification = true
+
+[models]
+planner_model_env = "CTF_PLANNER_MODEL"
+solver_model_env = "CTF_SOLVER_MODEL"
+verifier_model_env = "CTF_VERIFIER_MODEL"
+planner_effort_env = "CTF_PLANNER_EFFORT"
+solver_effort_env = "CTF_SOLVER_EFFORT"
+verifier_effort_env = "CTF_VERIFIER_EFFORT"
+
+[models.defaults]
+planner_model = "gpt-5.6-sol"
+solver_model = "gpt-5.6-sol"
+verifier_model = "gpt-5.6-sol"
+planner_effort = "high"
+solver_effort = "xhigh"
+verifier_effort = "high"
+simple_model = "gpt-5.6-terra"
+
+[runtime]
+max_hypothesis_lanes = 3
+submission_budget_default = 3
+max_extraction_depth = 5
+record_event_ledger = true
+resume_enabled = true
+
+[skills]
+core = "skills/ctf-core"
+web = "skills/ctf-web"
+pwn = "skills/ctf-pwn"
+rev = "skills/ctf-rev"
+crypto_math = "skills/ctf-crypto-math"
+crypto_binary = "skills/ctf-crypto-binary"
+forensics = "skills/ctf-forensics"
+writeup = "skills/ctf-writeup"

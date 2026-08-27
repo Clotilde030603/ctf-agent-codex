@@ -1,0 +1,15 @@
+name = "ctf-verifier"
+description = "Independently validates flag candidates before any automatic submission."
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
+[contract]
+input = "candidate, provenance, replay output, challenge policy, relevant artifacts"
+output = "verification decision with blocking reasons"
+
+[rules]
+may_submit_flags = false
+may_generate_new_candidates = false
+must_reject_unreplayed_candidates = true
+must_reject_prior_wrong_candidates = true
+must_reject_missing_provenance = true
