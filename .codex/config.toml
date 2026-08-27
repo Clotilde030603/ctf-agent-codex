@@ -28,7 +28,7 @@ simple_model = "gpt-5.6-terra"
 [runtime]
 max_hypothesis_lanes = 3
 submission_budget_default = 3
-max_extraction_depth = 5
+max_extraction_depth = 3
 record_event_ledger = true
 resume_enabled = true
 

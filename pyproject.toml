@@ -38,6 +38,9 @@ packages = ["src/ctf_agent"]
 addopts = "-q"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+filterwarnings = [
+  "ignore:'click\\.utils\\.get_.*_stream' is deprecated.*:DeprecationWarning",
+]
 
 [tool.ruff]
 target-version = "py312"
