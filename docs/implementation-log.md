@@ -15,3 +15,5 @@ Each row records a tested logical milestone and the confirmed push result at the
 | Integrated state workflow, automatic submit, Playwright session/capture | `99e2f54` | full 44-test suite; Ruff; strict mypy; compileall | pushed |
 
 The final test/documentation commit is recorded by its Git history because a commit cannot include its own hash.
+
+An independent post-implementation review then hardened the external submission crash window with durable pending attempts, restored VERIFY failure recovery transitions, redacted sensitive URL query data at the persistence boundary, and made Docker reproduction fail closed unless local replay is explicitly enabled.

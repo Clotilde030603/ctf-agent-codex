@@ -12,8 +12,10 @@ from ctf_agent.schemas import (
     Artifact,
     AuthSession,
     Challenge,
+    FlagCandidate,
     FlagPolicy,
     RunState,
+    SpecialistResult,
     SubmissionResult,
     SubmissionVerdict,
 )
@@ -25,6 +27,9 @@ PNG = base64.b64decode(
 
 
 class FakeCTFdAdapter:
+    def __init__(self) -> None:
+        self.submitted: list[str] = []
+
     async def authenticate(self) -> AuthSession:
         return AuthSession(authenticated=True)
 
@@ -62,12 +67,24 @@ class FakeCTFdAdapter:
         return challenge.flag_policy
 
     async def submit_flag(self, challenge: Challenge, flag: str) -> SubmissionResult:
+        self.submitted.append(flag)
         verdict = (
             SubmissionVerdict.ACCEPTED
             if flag == "flag{fixture_vertical_slice}"
             else SubmissionVerdict.WRONG
         )
         return SubmissionResult(verdict=verdict, message=verdict.value, status_code=200)
+
+    async def resolve_submission(
+        self, challenge: Challenge, flag: str
+    ) -> SubmissionResult | None:
+        if flag == "flag{fixture_vertical_slice}":
+            return SubmissionResult(
+                verdict=SubmissionVerdict.ALREADY_SOLVED,
+                message="resolved from platform state",
+                status_code=200,
+            )
+        return None
 
     async def capture_challenge(self, challenge: Challenge, destination: Path) -> Path:
         destination.write_bytes(PNG)
@@ -84,6 +101,7 @@ async def test_fake_ctfd_end_to_end_vertical_slice(tmp_path: Path) -> None:
         runs_dir=tmp_path / "runs",
         tool_timeout_seconds=10,
         submission_budget=2,
+        allow_local_reproduction=True,
     )
     workflow = AutonomousWorkflow(settings, FakeCTFdAdapter())
     controller = workflow.controller()
@@ -110,3 +128,89 @@ async def test_fake_ctfd_end_to_end_vertical_slice(tmp_path: Path) -> None:
     assert len(manifest["entries"]) == 4
     assert "flag{fixture_vertical_slice}" in (result.run_dir / "writeup.md").read_text()
     assert context.store.submission_count(result.run_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_submission_is_resolved_without_duplicate_submit(tmp_path: Path) -> None:
+    settings = Settings(
+        runs_dir=tmp_path / "runs",
+        tool_timeout_seconds=10,
+        submission_budget=2,
+        allow_local_reproduction=True,
+    )
+    adapter = FakeCTFdAdapter()
+    workflow = AutonomousWorkflow(settings, adapter)
+    controller = workflow.controller()
+    context = controller.create_run(
+        "https://ctf.test/challenges/7", auto_submit=True, writeup=True
+    )
+    context.store.begin_submission(
+        context.record.run_id, "flag{fixture_vertical_slice}", "crash-window-attempt"
+    )
+
+    result = await controller.execute(context)
+
+    assert result.state is RunState.DONE, result.last_error
+    assert adapter.submitted == []
+    assert context.store.submission_count(result.run_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_completed_submission_is_not_repeated_after_resume_window(tmp_path: Path) -> None:
+    settings = Settings(
+        runs_dir=tmp_path / "runs",
+        tool_timeout_seconds=10,
+        submission_budget=2,
+        allow_local_reproduction=True,
+    )
+    adapter = FakeCTFdAdapter()
+    workflow = AutonomousWorkflow(settings, adapter)
+    controller = workflow.controller()
+    context = controller.create_run(
+        "https://ctf.test/challenges/7", auto_submit=True, writeup=True
+    )
+    context.store.record_submission(
+        context.record.run_id,
+        "flag{fixture_vertical_slice}",
+        SubmissionVerdict.ACCEPTED.value,
+    )
+
+    result = await controller.execute(context)
+
+    assert result.state is RunState.DONE, result.last_error
+    assert adapter.submitted == []
+
+
+@pytest.mark.asyncio
+async def test_verification_rejection_returns_to_plan(tmp_path: Path) -> None:
+    workflow = AutonomousWorkflow(
+        Settings(runs_dir=tmp_path / "runs", allow_local_reproduction=True),
+        FakeCTFdAdapter(),
+    )
+    controller = workflow.controller()
+    context = controller.create_run(
+        "https://ctf.test/challenges/7", auto_submit=True, writeup=True
+    )
+    context.values["challenge"] = await FakeCTFdAdapter().fetch_challenge(
+        context.record.challenge_url
+    )
+    context.values["specialist_results"] = [
+        SpecialistResult(
+            hypothesis_id="H1",
+            status="confirmed",
+            flag_candidates=[
+                FlagCandidate(
+                    value="flag{sample}",
+                    source_artifact="files/payload.txt",
+                    source_location="offset 0",
+                    derivation=["fixture"],
+                    solver_command="python3 solve.py",
+                )
+            ],
+        )
+    ]
+
+    outcome = await workflow.verify(context)
+
+    assert outcome.target is RunState.PLAN
+    assert outcome.payload["accepted"] is False

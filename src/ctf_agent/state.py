@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 
 from ctf_agent.schemas import RunRecord, RunState
@@ -86,6 +87,17 @@ class StateStore:
                     submitted_at TEXT NOT NULL
                 )"""
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS submission_attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    verdict TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
 
     def create(self, record: RunRecord) -> None:
         with self._connect() as connection:
@@ -165,17 +177,53 @@ class StateStore:
             ).fetchone()
         return row is not None
 
-    def record_submission(self, run_id: str, value: str, verdict: str) -> None:
+    def begin_submission(self, run_id: str, value: str, attempt_id: str) -> None:
+        now = datetime.now(UTC).isoformat()
         with self._connect() as connection:
             connection.execute(
+                "INSERT OR IGNORE INTO submission_attempts VALUES(?,?,?,?,?,?,?)",
+                (attempt_id, run_id, value, "pending", None, now, now),
+            )
+
+    def pending_submission(self, run_id: str) -> tuple[str, str] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT attempt_id,value FROM submission_attempts "
+                "WHERE run_id=? AND status='pending' ORDER BY created_at LIMIT 1",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["attempt_id"]), str(row["value"])
+
+    def record_submission(
+        self,
+        run_id: str,
+        value: str,
+        verdict: str,
+        *,
+        attempt_id: str | None = None,
+    ) -> None:
+        if attempt_id is None:
+            seed = f"{run_id}\0{value}\0{datetime.now(UTC).isoformat()}"
+            attempt_id = sha256(seed.encode()).hexdigest()
+            self.begin_submission(run_id, value, attempt_id)
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE submission_attempts SET status='completed',verdict=?,updated_at=? "
+                "WHERE attempt_id=?",
+                (verdict, now, attempt_id),
+            )
+            connection.execute(
                 "INSERT INTO submissions(run_id,value,verdict,submitted_at) VALUES(?,?,?,?)",
-                (run_id, value, verdict, datetime.now(UTC).isoformat()),
+                (run_id, value, verdict, now),
             )
 
     def submission_count(self, run_id: str) -> int:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT COUNT(*) AS count FROM submissions WHERE run_id=?", (run_id,)
+                "SELECT COUNT(*) AS count FROM submission_attempts WHERE run_id=?", (run_id,)
             ).fetchone()
         return int(row["count"])
 
@@ -186,3 +234,12 @@ class StateStore:
                 (run_id, verdict),
             ).fetchone()
         return int(row["count"])
+
+    def latest_submission_verdict(self, run_id: str, value: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT verdict FROM submissions WHERE run_id=? AND value=? "
+                "ORDER BY id DESC LIMIT 1",
+                (run_id, value),
+            ).fetchone()
+        return str(row["verdict"]) if row is not None else None

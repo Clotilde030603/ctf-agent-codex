@@ -50,6 +50,11 @@ class GenericPlatformAdapter:
             "generic adapter cannot submit flags without platform-specific endpoint"
         )
 
+    async def resolve_submission(
+        self, challenge: Challenge, flag: str
+    ) -> SubmissionResult | None:
+        return None
+
     async def capture_challenge(self, challenge: Challenge, destination: Path) -> Path | None:
         return None
 

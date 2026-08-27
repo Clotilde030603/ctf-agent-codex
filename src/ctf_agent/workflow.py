@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, cast
@@ -23,6 +24,7 @@ from ctf_agent.schemas import (
     SpecialistResult,
     SubmissionVerdict,
 )
+from ctf_agent.security import redact_persisted_value
 from ctf_agent.specialists.deterministic import ArtifactSignalSpecialist
 from ctf_agent.triage import ScanConfig, classify_report, scan_path
 from ctf_agent.verification import FlagGate, RejectedCandidates, ReplayVerifier, SubmissionBudget
@@ -31,7 +33,10 @@ from ctf_agent.writeup import WriteupGenerator, WriteupValidator
 
 def _write_json(path: Path, value: object) -> None:
     path.write_text(
-        json.dumps(value, indent=2, sort_keys=True, default=str) + "\n",
+        json.dumps(
+            redact_persisted_value(value), indent=2, sort_keys=True, default=str
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -62,7 +67,7 @@ class AutonomousWorkflow:
         adapter = context.values.get("adapter")
         if adapter is not None:
             return cast(PlatformAdapter, adapter)
-        parsed = urlsplit(context.record.challenge_url)
+        parsed = urlsplit(self._challenge_url(context))
         base_url = f"{parsed.scheme}://{parsed.netloc}"
         storage_state = self.settings.browser_storage_state
         if storage_state is None:
@@ -95,7 +100,7 @@ class AutonomousWorkflow:
 
     async def ingest(self, context: RunContext) -> StateOutcome:
         adapter = self._adapter(context)
-        challenge = await adapter.fetch_challenge(context.record.challenge_url)
+        challenge = await adapter.fetch_challenge(self._challenge_url(context))
         challenge.flag_policy = await adapter.extract_flag_policy(challenge)
         artifacts = await adapter.download_attachments(challenge, context.record.run_dir / "files")
         _write_json(context.record.run_dir / "challenge.json", challenge.model_dump(mode="json"))
@@ -212,8 +217,9 @@ class AutonomousWorkflow:
         )
         context.values["specialist_results"] = list(result.specialist_results)
         if not result.solved:
-            raise RuntimeError(
-                f"all solver lanes stopped without a candidate: {result.stop_reason}"
+            return StateOutcome(
+                RunState.PLAN,
+                {"solved": False, "stop_reason": result.stop_reason},
             )
         return StateOutcome(RunState.VERIFY, {"stop_reason": result.stop_reason})
 
@@ -252,21 +258,94 @@ class AutonomousWorkflow:
                     )
                     return StateOutcome(RunState.SUBMIT, {"accepted": True, "flag": verified.value})
                 reasons.append(f"{candidate.value}: {outcome.reason}")
-        raise RuntimeError("no flag candidate passed verification: " + "; ".join(reasons))
+        context.ledger.append(
+            context.record.run_id,
+            "flag.verification_failed",
+            {"reasons": reasons},
+            state=RunState.VERIFY.value,
+        )
+        return StateOutcome(
+            RunState.PLAN,
+            {"accepted": False, "reasons": reasons},
+        )
 
     async def submit(self, context: RunContext) -> StateOutcome:
         candidate = self._candidate(context)
         if not context.record.auto_submit:
             raise RuntimeError("verified candidate is ready, but --auto-submit was not enabled")
-        used = context.store.submission_count(context.record.run_id)
-        budget = SubmissionBudget(self.settings.submission_budget, used)
-        gate = FlagGate(self._challenge(context).flag_policy)
-        decision = gate.evaluate(candidate, budget)
-        if not gate.reserve_submission(decision, budget):
-            raise RuntimeError(f"submission blocked: {decision.reason}")
-        result = await self._adapter(context).submit_flag(self._challenge(context), candidate.value)
+        previous_verdict = context.store.latest_submission_verdict(
+            context.record.run_id, candidate.value
+        )
+        if previous_verdict in {
+            SubmissionVerdict.ACCEPTED.value,
+            SubmissionVerdict.ALREADY_SOLVED.value,
+        }:
+            return StateOutcome(
+                RunState.EVIDENCE,
+                {"accepted": True, "flag": candidate.value, "resumed": True},
+            )
+        if previous_verdict == SubmissionVerdict.WRONG.value:
+            context.store.reject_candidate(
+                context.record.run_id,
+                candidate.value,
+                "previous durable submission verdict was wrong",
+            )
+            wrong_count = context.store.submission_count_for_verdict(
+                context.record.run_id, SubmissionVerdict.WRONG.value
+            )
+            target = RunState.TRIAGE if wrong_count >= 2 else RunState.PLAN
+            return StateOutcome(
+                target,
+                {"accepted": False, "wrong_count": wrong_count, "resumed": True},
+            )
+        adapter = self._adapter(context)
+        pending = context.store.pending_submission(context.record.run_id)
+        if pending is not None:
+            attempt_id, pending_value = pending
+            if pending_value != candidate.value:
+                raise RuntimeError("pending submission does not match verified candidate")
+            resolver = getattr(adapter, "resolve_submission", None)
+            if resolver is None:
+                raise RuntimeError("pending submission cannot be resolved by this platform")
+            result = await resolver(self._challenge(context), candidate.value)
+            if result is None or result.verdict in {
+                SubmissionVerdict.UNKNOWN,
+                SubmissionVerdict.RATE_LIMITED,
+            }:
+                raise RuntimeError(
+                    "pending submission outcome is unknown; refusing duplicate submission"
+                )
+            context.ledger.append(
+                context.record.run_id,
+                "submission.resolved",
+                {"attempt_id": attempt_id, "verdict": result.verdict.value},
+                state=RunState.SUBMIT.value,
+            )
+        else:
+            used = context.store.submission_count(context.record.run_id)
+            budget = SubmissionBudget(self.settings.submission_budget, used)
+            gate = FlagGate(self._challenge(context).flag_policy)
+            decision = gate.evaluate(candidate, budget)
+            if not gate.reserve_submission(decision, budget):
+                raise RuntimeError(f"submission blocked: {decision.reason}")
+            attempt_id = hashlib.sha256(
+                f"{context.record.run_id}\0{candidate.value}\0{used}".encode()
+            ).hexdigest()
+            context.store.begin_submission(
+                context.record.run_id, candidate.value, attempt_id
+            )
+            context.ledger.append(
+                context.record.run_id,
+                "submission.pending",
+                {"attempt_id": attempt_id, "flag": candidate.value},
+                state=RunState.SUBMIT.value,
+            )
+            result = await adapter.submit_flag(self._challenge(context), candidate.value)
         context.store.record_submission(
-            context.record.run_id, candidate.value, result.verdict.value
+            context.record.run_id,
+            candidate.value,
+            result.verdict.value,
+            attempt_id=attempt_id,
         )
         context.values["submission"] = result
         context.ledger.append(
@@ -363,6 +442,7 @@ class AutonomousWorkflow:
             self._candidate(context).value,
             image=self.settings.docker_image,
             timeout_seconds=self.settings.tool_timeout_seconds,
+            use_docker=not self.settings.allow_local_reproduction,
         )
         context.ledger.append(
             context.record.run_id,
@@ -426,6 +506,10 @@ class AutonomousWorkflow:
     @staticmethod
     def _load_json(path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _challenge_url(context: RunContext) -> str:
+        return str(context.values.get("challenge_url") or context.record.challenge_url)
 
 
 _FALLBACK_PNG = (

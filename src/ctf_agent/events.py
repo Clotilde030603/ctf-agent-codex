@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ctf_agent.security import redact_persisted_value
+
 
 class EventLedger:
     def __init__(self, database: Path, jsonl: Path) -> None:
@@ -49,7 +51,7 @@ class EventLedger:
         idempotency_key: str | None = None,
     ) -> int:
         created_at = datetime.now(UTC).isoformat()
-        data = payload or {}
+        data = redact_persisted_value(payload or {})
         encoded = json.dumps(data, sort_keys=True, default=str)
         with self._lock, self._connect() as connection:
             try:

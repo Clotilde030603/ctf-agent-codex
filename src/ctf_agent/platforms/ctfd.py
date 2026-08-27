@@ -15,6 +15,7 @@ from ctf_agent.platforms.base import (
     Challenge,
     FlagPolicy,
     SubmissionResult,
+    SubmissionVerdict,
     challenge_from_mapping,
     parse_submission_verdict,
 )
@@ -76,6 +77,13 @@ class CTFdPlatformAdapter(GenericPlatformAdapter):
         challenge = challenge_from_mapping(data, fallback_url=url)
         challenge.url = url
         challenge.id = str(challenge_id)
+        challenge.metadata.update(
+            {
+                key: data[key]
+                for key in ("solved", "solved_by_me", "attempts")
+                if key in data
+            }
+        )
         challenge.attachment_urls = [
             _absolute_file_url(self.base_url, item) for item in challenge.attachment_urls
         ]
@@ -105,6 +113,18 @@ class CTFdPlatformAdapter(GenericPlatformAdapter):
         except ValueError:
             payload = response.text
         return parse_submission_verdict(payload, status_code=response.status_code)
+
+    async def resolve_submission(
+        self, challenge: Challenge, flag: str
+    ) -> SubmissionResult | None:
+        current = await self.fetch_challenge(challenge.url)
+        if current.metadata.get("solved_by_me") is True or current.metadata.get("solved") is True:
+            return SubmissionResult(
+                verdict=SubmissionVerdict.ALREADY_SOLVED,
+                message="platform challenge state is solved",
+                status_code=200,
+            )
+        return None
 
     async def capture_challenge(self, challenge: Challenge, destination: Path) -> Path | None:
         if self.browser_storage_state is None:

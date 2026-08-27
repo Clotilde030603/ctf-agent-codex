@@ -23,9 +23,16 @@ def solve(
     writeup: Annotated[bool, typer.Option("--writeup/--no-writeup")] = True,
     runs_dir: Annotated[Path, typer.Option("--runs-dir")] = Path("runs"),
     allow_private_host: Annotated[bool, typer.Option("--allow-private-host")] = False,
+    allow_local_reproduction: Annotated[
+        bool, typer.Option("--allow-local-reproduction")
+    ] = False,
 ) -> None:
     """Create and execute a new challenge run."""
-    settings = Settings(runs_dir=runs_dir, allow_private_hosts=allow_private_host)
+    settings = Settings(
+        runs_dir=runs_dir,
+        allow_private_hosts=allow_private_host,
+        allow_local_reproduction=allow_local_reproduction,
+    )
     workflow = AutonomousWorkflow(settings)
     controller = workflow.controller()
     context = controller.create_run(url, auto_submit=auto_submit, writeup=writeup)
@@ -43,11 +50,18 @@ def solve(
 def resume(
     run_id: Annotated[str, typer.Argument(help="Existing run identifier")],
     runs_dir: Annotated[Path, typer.Option("--runs-dir")] = Path("runs"),
+    challenge_url: Annotated[
+        str | None,
+        typer.Option(
+            "--challenge-url",
+            help="Re-supply a credential-bearing URL without persisting its secret query",
+        ),
+    ] = None,
 ) -> None:
     """Continue from the last durable state checkpoint."""
     workflow = AutonomousWorkflow(Settings(runs_dir=runs_dir))
     controller = workflow.controller()
-    context = controller.resume_run(run_id)
+    context = controller.resume_run(run_id, challenge_url=challenge_url)
     result = asyncio.run(controller.execute(context))
     typer.echo(
         json.dumps(

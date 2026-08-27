@@ -18,6 +18,7 @@ from uuid import uuid4
 from ctf_agent.config import Settings
 from ctf_agent.events import EventLedger
 from ctf_agent.schemas import RunRecord, RunState
+from ctf_agent.security import redact_url
 from ctf_agent.state import StateStore
 
 
@@ -66,7 +67,7 @@ class Controller:
         store = StateStore(run_dir / "state.db")
         record = RunRecord(
             run_id=run_id,
-            challenge_url=url,
+            challenge_url=redact_url(url),
             run_dir=run_dir,
             auto_submit=auto_submit,
             writeup=writeup,
@@ -80,9 +81,15 @@ class Controller:
             state=record.state.value,
             idempotency_key="run-created",
         )
-        return RunContext(record, store, ledger, self.settings)
+        return RunContext(
+            record,
+            store,
+            ledger,
+            self.settings,
+            values={"challenge_url": url},
+        )
 
-    def resume_run(self, run_id: str) -> RunContext:
+    def resume_run(self, run_id: str, *, challenge_url: str | None = None) -> RunContext:
         candidates = list(self.settings.runs_dir.glob(f"**/*{run_id}*/state.db"))
         if not candidates:
             candidates = list(self.settings.runs_dir.glob("**/state.db"))
@@ -99,11 +106,34 @@ class Controller:
                 {"checkpoint": record.state.value},
                 state=record.state.value,
             )
-            return RunContext(record, store, ledger, self.settings)
+            if challenge_url is None and "REDACTED" in record.challenge_url:
+                raise RuntimeError(
+                    "this run used a credential-bearing challenge URL; pass the original "
+                    "URL with resume --challenge-url so it remains memory-only"
+                )
+            runtime_url = challenge_url or record.challenge_url
+            if redact_url(runtime_url) != record.challenge_url:
+                raise ValueError("resume challenge URL does not match the stored run")
+            return RunContext(
+                record,
+                store,
+                ledger,
+                self.settings,
+                values={"challenge_url": runtime_url},
+            )
         raise KeyError(f"run not found: {run_id}")
 
     async def execute(self, context: RunContext) -> RunRecord:
+        steps = 0
         while context.record.state not in {RunState.DONE, RunState.FAILED}:
+            steps += 1
+            if steps > self.settings.max_state_steps:
+                context.record = context.store.transition(
+                    context.record.run_id,
+                    RunState.FAILED,
+                    "maximum deterministic state-step budget exhausted",
+                )
+                return context.record
             state = context.record.state
             handler = self.handlers.get(state)
             if handler is None:

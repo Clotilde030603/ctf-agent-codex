@@ -142,6 +142,12 @@ Resume command:
 ctf-agent resume <run-id>
 ```
 
+If the original challenge URL contained a signed or credential-bearing query, the stored run keeps only a redacted URL. Re-supply the original value at runtime without persisting it:
+
+```bash
+ctf-agent resume <run-id> --challenge-url "https://ctf.example/challenge?token=..."
+```
+
 Benchmark command:
 
 ```bash
@@ -198,5 +204,5 @@ See [docs/evaluation.md](docs/evaluation.md).
 - CTFd is the complete API-first adapter. Generic HTML ingestion cannot submit without a platform-specific endpoint, and rCTF currently inherits the generic adapter surface.
 - Real CTF credentials, MFA, CAPTCHA, and platform policies require user-controlled first authentication. Playwright detects successful login and continues without a terminal Enter prompt.
 - Evidence screenshots require Playwright and an authenticated browser storage state. Runs fail closed rather than claiming complete evidence when captures are missing.
-- Docker is preferred for clean reproduction. If the Docker CLI exists but its daemon is unavailable, the runner records and uses an isolated `python -I` replay as the next-best local check.
+- Docker is required by default for clean reproduction. Local `python -I` replay is available only through the explicit `--allow-local-reproduction` opt-in and is surfaced as a weaker verification mode.
 - External tools such as Ghidra, ReVa, binwalk, exiftool, and checksec are optional capabilities and must be detected before use.

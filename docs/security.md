@@ -45,7 +45,7 @@ Before rendering terminal evidence or writing logs intended for write-up use, re
 - private session IDs;
 - authorization headers.
 
-The evidence manifest records whether sanitization ran.
+The evidence manifest records whether sanitization ran. Before SQLite or JSONL persistence, signed URL query parameters such as tokens, signatures, credentials, sessions, CSRF values, and API keys are replaced with `REDACTED`.
 
 ## Sandbox
 
