@@ -126,6 +126,8 @@ class CodexCliBackend:
             "--ephemeral",
             "--sandbox",
             self._sandbox,
+            "--ignore-user-config",
+            "--ignore-rules",
             "--output-schema",
             str(schema_path),
             "--output-last-message",

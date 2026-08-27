@@ -4,20 +4,17 @@ from pathlib import Path
 
 from ctf_agent.config import Settings
 from ctf_agent.models.base import ModelBackend
-from ctf_agent.models.codex import CodexCliBackend, SandboxMode
+from ctf_agent.models.codex import CodexCliBackend
 
 
 def create_codex_backend(settings: Settings, role: str, cwd: Path) -> ModelBackend:
     model, reasoning_effort = _model_settings(settings, role)
-    sandbox: SandboxMode = (
-        "workspace-write" if role.strip().lower() == "solver" else "read-only"
-    )
     return CodexCliBackend(
         executable=settings.codex_binary,
         model=model,
         reasoning_effort=reasoning_effort,
         cwd=cwd,
-        sandbox=sandbox,
+        sandbox="read-only",
         timeout_seconds=settings.model_timeout_seconds,
         max_prompt_bytes=settings.max_model_context_bytes,
     )

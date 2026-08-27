@@ -57,6 +57,8 @@ final.write_text(json.dumps({"content": "flag{ok}", "metadata": payload}))
     args = response.metadata["args"]
     assert args[:2] == ["exec", "--ephemeral"]
     assert ["--sandbox", "read-only"] == [args[2], args[3]]
+    assert "--ignore-user-config" in args
+    assert "--ignore-rules" in args
     assert "--output-schema" in args
     assert "--output-last-message" in args
     assert ["--model", "gpt-test"] == [args[args.index("--model")], args[args.index("--model") + 1]]

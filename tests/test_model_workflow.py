@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
 from ctf_agent.config import Settings
-from ctf_agent.models.base import ModelBackendError, ModelResponse
+from ctf_agent.models.base import ModelBackend, ModelBackendError, ModelResponse
 from ctf_agent.models.claude import ClaudeStubBackend
 from ctf_agent.schemas import Challenge, FlagPolicy, RunState
 from ctf_agent.workflow import AutonomousWorkflow
@@ -145,3 +147,180 @@ def test_model_call_budget_prevents_unbounded_planning(tmp_path: Path) -> None:
 
     assert outcome.payload["planner_source"] == "static"
     assert backend.requests == []
+
+
+def test_model_solver_worker_is_used_when_preflight_finds_no_flag(tmp_path: Path) -> None:
+    planner_backend = ClaudeStubBackend([_planner_response()])
+    solver_source = (
+        "from pathlib import Path\n"
+        "import base64\n"
+        "print(base64.b64decode(Path('files/payload.txt').read_text()).decode())\n"
+    )
+    candidate = {
+        "value": "flag{workflow_model_worker}",
+        "source_artifact": "files/payload.txt",
+        "source_location": "base64 decoded bytes",
+        "derivation": ["base64 decode"],
+        "solver_command": "python3 solve.py",
+        "confidence": 0.91,
+    }
+    solver_backend = ClaudeStubBackend(
+        [
+            json.dumps(
+                {
+                    "action": "write_file",
+                    "path": "solve.py",
+                    "content": solver_source,
+                    "facts": ["payload is base64"],
+                }
+            ),
+            json.dumps(
+                {
+                    "action": "run",
+                    "argv": [sys.executable, "solve.py"],
+                    "facts": ["decoded output matches flag policy"],
+                    "flag_candidates": [candidate],
+                }
+            ),
+            json.dumps(
+                {
+                    "action": "finish",
+                    "message": "solver reproduced candidate",
+                    "flag_candidates": [candidate],
+                }
+            ),
+        ]
+    )
+
+    def solver_factory(
+        settings: Settings, role: str, cwd: Path
+    ) -> ModelBackend:
+        assert role == "solver"
+        assert cwd.parent.name == "lanes"
+        return solver_backend
+
+    workflow = AutonomousWorkflow(
+        Settings(
+            backend="codex",
+            runs_dir=tmp_path / "runs",
+            allow_local_reproduction=True,
+            worker_max_steps=4,
+            worker_max_commands=2,
+            max_hypotheses=1,
+            max_workers=1,
+        ),
+        planner_backend=planner_backend,
+        solver_backend_factory=solver_factory,
+        worker_local_test_mode=True,
+        worker_allowed_argv0={Path(sys.executable).name},
+    )
+    controller = workflow.controller()
+    context = controller.create_run(
+        "https://ctf.test/challenges/8", auto_submit=False, writeup=False
+    )
+    context.values["challenge"] = Challenge(
+        id="8",
+        url="https://ctf.test/challenges/8",
+        title="Encoded Model Fixture",
+        category="crypto-binary",
+        flag_policy=FlagPolicy(pattern=r"flag\{[^{}]+\}"),
+    )
+    encoded = base64.b64encode(b"flag{workflow_model_worker}").decode()
+    (context.record.run_dir / "files" / "payload.txt").write_text(encoded)
+    triage = {
+        "classification": {
+            "primary_category": "crypto-binary",
+            "evidence": [{"reason": "base64-like payload"}],
+        },
+        "files": [
+            {
+                "relative_path": "payload.txt",
+                "size": len(encoded),
+                "mime": "text/plain",
+                "magic": "ASCII text",
+                "entropy": 4.0,
+                "language": None,
+                "indicators": [],
+                "tool_results": [],
+            }
+        ],
+    }
+    context.values["triage"] = triage
+    (context.record.run_dir / "triage.json").write_text(json.dumps(triage))
+
+    asyncio.run(workflow.plan(context))
+    outcome = asyncio.run(workflow.solve(context))
+
+    assert outcome.target is RunState.VERIFY
+    assert outcome.payload["stop_reason"] == "solved"
+    assert (context.record.run_dir / "solve.py").is_file()
+    persisted = json.loads(
+        (context.record.run_dir / "artifacts" / "specialist-results.json").read_text()
+    )
+    assert persisted[0]["flag_candidates"][0]["value"] == "flag{workflow_model_worker}"
+    assert len(solver_backend.requests) == 3
+    model_events = [
+        event
+        for event in context.ledger.list(context.record.run_id)
+        if event["event_type"] == "model.request"
+    ]
+    assert [event["payload"]["role"] for event in model_events] == [
+        "planner",
+        "solver",
+        "solver",
+        "solver",
+    ]
+
+
+def test_solver_lanes_cannot_exceed_shared_model_budget_after_plan(tmp_path: Path) -> None:
+    planner_backend = ClaudeStubBackend([_planner_response()])
+    solver_backend = ClaudeStubBackend(
+        [
+            json.dumps(
+                {
+                    "action": "write_file",
+                    "path": "solve.py",
+                    "content": "print('not enough budget')\n",
+                }
+            )
+        ]
+    )
+    workflow = AutonomousWorkflow(
+        Settings(
+            backend="codex",
+            runs_dir=tmp_path / "runs",
+            model_call_budget=2,
+            max_hypotheses=1,
+            max_workers=1,
+            worker_max_steps=4,
+            allow_local_reproduction=True,
+        ),
+        planner_backend=planner_backend,
+        solver_backend_factory=lambda _settings, _role, _cwd: solver_backend,
+        worker_local_test_mode=True,
+    )
+    context = workflow.controller().create_run(
+        "https://ctf.test/challenges/9", auto_submit=False, writeup=False
+    )
+    context.values["challenge"] = Challenge(
+        id="9",
+        url="https://ctf.test/challenges/9",
+        title="Budget Fixture",
+        flag_policy=FlagPolicy(pattern=r"flag\{[^{}]+\}"),
+    )
+    triage = {"classification": {"primary_category": "misc"}, "files": []}
+    context.values["triage"] = triage
+    (context.record.run_dir / "triage.json").write_text(json.dumps(triage))
+
+    asyncio.run(workflow.plan(context))
+    context.values.pop("hypotheses")
+    outcome = asyncio.run(workflow.solve(context))
+
+    assert outcome.target is RunState.PLAN
+    assert len(solver_backend.requests) == 1
+    model_events = [
+        event
+        for event in context.ledger.list(context.record.run_id)
+        if event["event_type"] == "model.request"
+    ]
+    assert len(model_events) == 2

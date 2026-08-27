@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     max_model_context_bytes: int = Field(default=512 * 1024, ge=4096)
     max_workers: int = Field(default=3, ge=1, le=3)
     allow_static_fallback: bool = True
+    worker_max_steps: int = Field(default=12, ge=1, le=100)
+    worker_max_commands: int = Field(default=8, ge=0, le=100)
+    worker_wall_time_seconds: float = Field(default=600, gt=0, le=3600)
+    worker_no_progress_limit: int = Field(default=3, ge=1, le=20)
     request_timeout_seconds: float = Field(default=20, gt=0, le=120)
     tool_timeout_seconds: float = Field(default=30, gt=0, le=600)
     retry_budget: int = Field(default=2, ge=0, le=10)

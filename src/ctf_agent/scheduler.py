@@ -138,6 +138,11 @@ class Scheduler:
     specialists: tuple[Specialist, ...]
     no_progress_cutoff: int = 1
     max_rounds: int = 1
+    max_concurrency: int = MAX_HYPOTHESES
+
+    def __post_init__(self) -> None:
+        if self.max_concurrency < 1 or self.max_concurrency > MAX_HYPOTHESES:
+            raise ValueError("max_concurrency must be between 1 and 3")
 
     async def run(self, context: dict[str, object]) -> SchedulerRunResult:
         hypotheses = await self.planner.plan(context)
@@ -180,6 +185,7 @@ class Scheduler:
         context: dict[str, object],
     ) -> list[SpecialistResult]:
         tasks: list[asyncio.Task[SpecialistResult]] = []
+        semaphore = asyncio.Semaphore(self.max_concurrency)
         for hypothesis in hypotheses:
             matching = [
                 specialist
@@ -190,7 +196,9 @@ class Scheduler:
             for specialist in selected:
                 tasks.append(
                     asyncio.create_task(
-                        self._solve_lane(specialist, hypothesis, context)
+                        self._solve_lane_limited(
+                            semaphore, specialist, hypothesis, context
+                        )
                     )
                 )
 
@@ -198,6 +206,17 @@ class Scheduler:
         for task in asyncio.as_completed(tasks):
             results.append(await task)
         return results
+
+    @classmethod
+    async def _solve_lane_limited(
+        cls,
+        semaphore: asyncio.Semaphore,
+        specialist: Specialist,
+        hypothesis: Hypothesis,
+        context: dict[str, object],
+    ) -> SpecialistResult:
+        async with semaphore:
+            return await cls._solve_lane(specialist, hypothesis, context)
 
     @staticmethod
     async def _solve_lane(

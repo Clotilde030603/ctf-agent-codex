@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit
@@ -28,8 +29,10 @@ from ctf_agent.schemas import (
 )
 from ctf_agent.security import redact_persisted_value
 from ctf_agent.specialists.deterministic import ArtifactSignalSpecialist
+from ctf_agent.specialists.model import BackendFactory, ModelSolverSpecialist
 from ctf_agent.triage import ScanConfig, classify_report, scan_path
 from ctf_agent.verification import FlagGate, RejectedCandidates, ReplayVerifier, SubmissionBudget
+from ctf_agent.workers import SharedModelCallBudget
 from ctf_agent.writeup import WriteupGenerator, WriteupValidator
 
 
@@ -50,10 +53,16 @@ class AutonomousWorkflow:
         adapter: PlatformAdapter | None = None,
         *,
         planner_backend: ModelBackend | None = None,
+        solver_backend_factory: BackendFactory = create_codex_backend,
+        worker_local_test_mode: bool = False,
+        worker_allowed_argv0: set[str] | None = None,
     ) -> None:
         self.settings = settings
         self._adapter_override = adapter
         self._planner_backend_override = planner_backend
+        self._solver_backend_factory = solver_backend_factory
+        self._worker_local_test_mode = worker_local_test_mode
+        self._worker_allowed_argv0 = worker_allowed_argv0
         self.handlers: dict[RunState, StateHandler] = {
             RunState.AUTHENTICATE: self.authenticate,
             RunState.INGEST: self.ingest,
@@ -267,34 +276,86 @@ class AutonomousWorkflow:
             hypotheses = [Hypothesis.model_validate(item) for item in self._load_json(
                 context.record.run_dir / "hypotheses.json"
             )]
-        scheduler = Scheduler(
-            StaticHypothesisPlanner(hypotheses),
-            (ArtifactSignalSpecialist(),),
-            no_progress_cutoff=3,
-            max_rounds=1,
+            context.values["hypotheses"] = hypotheses
+        triage_data = context.values.get("triage") or self._load_json(
+            context.record.run_dir / "triage.json"
         )
-        result = await scheduler.run(
-            {
-                "run_dir": str(context.record.run_dir),
-                "triage": context.values.get("triage")
-                or self._load_json(context.record.run_dir / "triage.json"),
-            }
+        solver_context = self._solver_context(context, triage_data)
+        preflight = await ArtifactSignalSpecialist().solve(
+            hypotheses[0], solver_context
         )
+        specialist_results: tuple[SpecialistResult, ...]
+        if preflight.status == "confirmed" and preflight.flag_candidates:
+            specialist_results = (preflight,)
+            solved = True
+            stop_reason = "artifact_signal"
+        else:
+            existing_model_requests = sum(
+                event["event_type"] == "model.request"
+                for event in context.ledger.list(context.record.run_id)
+            )
+            remaining_model_calls = max(
+                0, self.settings.model_call_budget - existing_model_requests
+            )
+
+            def record_solver_call(index: int) -> None:
+                context.ledger.append(
+                    context.record.run_id,
+                    "model.request",
+                    {
+                        "role": "solver",
+                        "model": self.settings.solver_model,
+                        "request_index": existing_model_requests + index,
+                    },
+                    state=RunState.SOLVE.value,
+                )
+
+            shared_model_budget = SharedModelCallBudget(
+                remaining_model_calls,
+                on_reserve=record_solver_call,
+            )
+            specialists = (
+                (
+                    ModelSolverSpecialist(
+                        self.settings,
+                        backend_factory=self._solver_backend_factory,
+                        local_test_mode=self._worker_local_test_mode,
+                        allowed_argv0=self._worker_allowed_argv0,
+                        shared_model_budget=shared_model_budget,
+                    ),
+                )
+                if self.settings.backend == "codex"
+                else (ArtifactSignalSpecialist(),)
+            )
+            scheduler = Scheduler(
+                StaticHypothesisPlanner(hypotheses),
+                specialists,
+                no_progress_cutoff=3,
+                max_rounds=1,
+                max_concurrency=self.settings.max_workers,
+            )
+            result = await scheduler.run(solver_context)
+            specialist_results = result.specialist_results
+            solved = result.solved
+            stop_reason = result.stop_reason
         _write_json(
             context.record.run_dir / "artifacts" / "specialist-results.json",
-            [item.model_dump(mode="json") for item in result.specialist_results],
+            [item.model_dump(mode="json") for item in specialist_results],
         )
-        (context.record.run_dir / "requirements.txt").write_text(
-            "# Final deterministic solver uses only Python 3.12 standard library.\n",
-            encoding="utf-8",
-        )
-        context.values["specialist_results"] = list(result.specialist_results)
-        if not result.solved:
+        self._promote_solver(context.record.run_dir, specialist_results)
+        requirements = context.record.run_dir / "requirements.txt"
+        if not requirements.exists():
+            requirements.write_text(
+                "# Solver dependencies were not declared by the selected lane.\n",
+                encoding="utf-8",
+            )
+        context.values["specialist_results"] = list(specialist_results)
+        if not solved:
             return StateOutcome(
                 RunState.PLAN,
-                {"solved": False, "stop_reason": result.stop_reason},
+                {"solved": False, "stop_reason": stop_reason},
             )
-        return StateOutcome(RunState.VERIFY, {"stop_reason": result.stop_reason})
+        return StateOutcome(RunState.VERIFY, {"stop_reason": stop_reason})
 
     async def verify(self, context: RunContext) -> StateOutcome:
         challenge = self._challenge(context)
@@ -637,6 +698,38 @@ class AutonomousWorkflow:
             "files": files,
             "previous_attempts_and_failures": previous_events,
         }
+
+    def _solver_context(
+        self, context: RunContext, triage_data: object
+    ) -> dict[str, object]:
+        planning = self._planning_context(
+            context, triage_data if isinstance(triage_data, dict) else {}
+        )
+        return {
+            **planning,
+            "run_dir": str(context.record.run_dir),
+            "triage": triage_data,
+        }
+
+    @staticmethod
+    def _promote_solver(
+        run_dir: Path, results: tuple[SpecialistResult, ...]
+    ) -> None:
+        for result in results:
+            if not result.flag_candidates:
+                continue
+            for artifact in result.artifacts:
+                candidate = (run_dir / artifact).resolve()
+                if (
+                    candidate.name == "solve.py"
+                    and candidate.is_file()
+                    and run_dir in candidate.parents
+                ):
+                    shutil.copy2(candidate, run_dir / "solve.py")
+                    requirements = candidate.parent / "requirements.txt"
+                    if requirements.is_file():
+                        shutil.copy2(requirements, run_dir / "requirements.txt")
+                    return
 
     @staticmethod
     def _challenge_url(context: RunContext) -> str:
