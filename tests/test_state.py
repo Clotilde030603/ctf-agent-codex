@@ -35,3 +35,17 @@ def test_event_ledger_deduplicates_idempotency_key(tmp_path: Path) -> None:
     assert first == second
     assert len(ledger.list("r1")) == 1
     assert len((tmp_path / "events.jsonl").read_text().splitlines()) == 1
+
+
+def test_abandoned_auth_submission_does_not_consume_budget(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.db")
+    store.create(
+        RunRecord(run_id="r1", challenge_url="https://ctf.test/c/1", run_dir=tmp_path)
+    )
+    store.begin_submission("r1", "flag{x}", "attempt-1")
+    assert store.submission_count("r1") == 1
+
+    store.abandon_submission("attempt-1", "auth_required")
+
+    assert store.submission_count("r1") == 0
+    assert store.pending_submission("r1") is None

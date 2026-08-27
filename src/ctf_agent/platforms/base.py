@@ -104,6 +104,8 @@ def parse_submission_verdict(
     message = _payload_message(payload)
     if status_code == 429 or "rate limit" in text or "too many" in text:
         verdict = Verdict.RATE_LIMITED
+    elif status_code == 401:
+        verdict = Verdict.AUTH_REQUIRED
     elif "already solved" in text:
         verdict = Verdict.ALREADY_SOLVED
     elif any(

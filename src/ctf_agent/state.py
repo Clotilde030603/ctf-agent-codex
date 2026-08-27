@@ -17,6 +17,7 @@ FORWARD_TRANSITIONS: dict[RunState, set[RunState]] = {
     RunState.SOLVE: {RunState.VERIFY, RunState.PLAN, RunState.FAILED},
     RunState.VERIFY: {RunState.SUBMIT, RunState.SOLVE, RunState.PLAN, RunState.FAILED},
     RunState.SUBMIT: {
+        RunState.AUTHENTICATE,
         RunState.EVIDENCE,
         RunState.READY,
         RunState.PLAN,
@@ -203,6 +204,14 @@ class StateStore:
             return None
         return str(row["attempt_id"]), str(row["value"])
 
+    def abandon_submission(self, attempt_id: str, verdict: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE submission_attempts SET status='abandoned',verdict=?,updated_at=? "
+                "WHERE attempt_id=? AND status='pending'",
+                (verdict, datetime.now(UTC).isoformat(), attempt_id),
+            )
+
     def record_submission(
         self,
         run_id: str,
@@ -230,7 +239,9 @@ class StateStore:
     def submission_count(self, run_id: str) -> int:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT COUNT(*) AS count FROM submission_attempts WHERE run_id=?", (run_id,)
+                "SELECT COUNT(*) AS count FROM submission_attempts "
+                "WHERE run_id=? AND status!='abandoned'",
+                (run_id,),
             ).fetchone()
         return int(row["count"])
 

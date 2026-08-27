@@ -291,3 +291,47 @@ async def test_blind_gate_rejects_hardcoded_solver_in_workflow(tmp_path: Path) -
 
     assert outcome.target is RunState.PLAN
     assert any("hardcode" in reason for reason in outcome.payload["reasons"])
+
+
+@pytest.mark.asyncio
+async def test_auth_required_submission_returns_to_auth_without_budget_cost(
+    tmp_path: Path,
+) -> None:
+    class ExpiredAdapter(FakeCTFdAdapter):
+        async def submit_flag(
+            self, challenge: Challenge, flag: str
+        ) -> SubmissionResult:
+            return SubmissionResult(
+                verdict=SubmissionVerdict.AUTH_REQUIRED,
+                message="session expired",
+                status_code=401,
+            )
+
+    adapter = ExpiredAdapter()
+    workflow = AutonomousWorkflow(
+        Settings(backend="static", runs_dir=tmp_path / "runs"), adapter
+    )
+    context = workflow.controller().create_run(
+        "https://ctf.test/challenges/11", auto_submit=True, writeup=False
+    )
+    context.values["challenge"] = await adapter.fetch_challenge(
+        "https://ctf.test/challenges/11"
+    )
+    context.values["candidate"] = FlagCandidate(
+        value="flag{verified}",
+        source_artifact="files/payload.txt",
+        source_location="line 1",
+        derivation=["fixture"],
+        solver_command="python3 solve.py",
+        format_match=True,
+        provenance_verified=True,
+        replay_verified=True,
+        independent_verified=True,
+        submission_allowed=True,
+    )
+
+    outcome = await workflow.submit(context)
+
+    assert outcome.target is RunState.AUTHENTICATE
+    assert context.store.submission_count(context.record.run_id) == 0
+    assert context.store.pending_submission(context.record.run_id) is None

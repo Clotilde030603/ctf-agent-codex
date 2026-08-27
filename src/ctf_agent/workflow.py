@@ -13,10 +13,11 @@ from urllib.parse import urlsplit
 from ctf_agent.config import Settings
 from ctf_agent.engine import Controller, RunContext, StateHandler, StateOutcome
 from ctf_agent.evidence import EvidenceManifest, TerminalRenderer
+from ctf_agent.ingestion.session import ScopedAsyncSession, SessionConfig
 from ctf_agent.models.base import ModelBackend, ModelBackendError
 from ctf_agent.models.factory import create_codex_backend
 from ctf_agent.platforms.base import PlatformAdapter
-from ctf_agent.platforms.ctfd import CTFdPlatformAdapter
+from ctf_agent.platforms.detect import create_detected_adapter
 from ctf_agent.reproduction import reproduce_solver
 from ctf_agent.scheduler import ModelHypothesisPlanner, Scheduler, StaticHypothesisPlanner
 from ctf_agent.schemas import (
@@ -27,6 +28,7 @@ from ctf_agent.schemas import (
     SpecialistResult,
     SubmissionVerdict,
 )
+from ctf_agent.scope import HostScope
 from ctf_agent.security import redact_persisted_value
 from ctf_agent.specialists.crypto import CryptoSpecialist
 from ctf_agent.specialists.deterministic import ArtifactSignalSpecialist
@@ -88,7 +90,7 @@ class AutonomousWorkflow:
     def controller(self) -> Controller:
         return Controller(self.settings, self.handlers)
 
-    def _adapter(self, context: RunContext) -> PlatformAdapter:
+    async def _adapter(self, context: RunContext) -> PlatformAdapter:
         if self._adapter_override is not None:
             return self._adapter_override
         adapter = context.values.get("adapter")
@@ -108,17 +110,31 @@ class AutonomousWorkflow:
                 state=context.record.state.value,
             )
 
-        created = CTFdPlatformAdapter(
+        scope = HostScope.from_url(
             base_url,
+            allow_private_hosts=self.settings.allow_private_hosts,
+        )
+        session = ScopedAsyncSession(
+            scope,
+            config=SessionConfig(
+                timeout_seconds=self.settings.request_timeout_seconds,
+                retry_budget=self.settings.retry_budget,
+                rate_limit_per_second=self.settings.rate_limit_per_second,
+            ),
+            request_observer=observe,
+        )
+        created = await create_detected_adapter(
+            self._challenge_url(context),
+            session=session,
             browser_storage_state=storage_state,
             allow_private_hosts=self.settings.allow_private_hosts,
-            request_observer=observe,
         )
         context.values["adapter"] = created
         return created
 
     async def authenticate(self, context: RunContext) -> StateOutcome:
-        session = await self._adapter(context).authenticate()
+        adapter = await self._adapter(context)
+        session = await adapter.authenticate()
         if not session.authenticated:
             raise RuntimeError(
                 "no authenticated platform session; configure a browser/session cookie first"
@@ -126,7 +142,7 @@ class AutonomousWorkflow:
         return StateOutcome(RunState.INGEST, {"authenticated": True})
 
     async def ingest(self, context: RunContext) -> StateOutcome:
-        adapter = self._adapter(context)
+        adapter = await self._adapter(context)
         challenge = await adapter.fetch_challenge(self._challenge_url(context))
         challenge.flag_policy = await adapter.extract_flag_policy(challenge)
         artifacts = await adapter.download_attachments(challenge, context.record.run_dir / "files")
@@ -522,7 +538,7 @@ class AutonomousWorkflow:
                 target,
                 {"accepted": False, "wrong_count": wrong_count, "resumed": True},
             )
-        adapter = self._adapter(context)
+        adapter = await self._adapter(context)
         pending = context.store.pending_submission(context.record.run_id)
         if pending is not None:
             attempt_id, pending_value = pending
@@ -565,6 +581,18 @@ class AutonomousWorkflow:
                 state=RunState.SUBMIT.value,
             )
             result = await adapter.submit_flag(self._challenge(context), candidate.value)
+        if result.verdict is SubmissionVerdict.AUTH_REQUIRED:
+            context.store.abandon_submission(attempt_id, result.verdict.value)
+            context.ledger.append(
+                context.record.run_id,
+                "authentication.expired",
+                {"attempt_id": attempt_id, "message": result.message},
+                state=RunState.SUBMIT.value,
+            )
+            return StateOutcome(
+                RunState.AUTHENTICATE,
+                {"authenticated": False, "submission_consumed": False},
+            )
         context.store.record_submission(
             context.record.run_id,
             candidate.value,
@@ -601,7 +629,7 @@ class AutonomousWorkflow:
         run_dir = context.record.run_dir
         evidence_dir = run_dir / "evidence"
         challenge = self._challenge(context)
-        adapter = self._adapter(context)
+        adapter = await self._adapter(context)
         challenge_image = await adapter.capture_challenge(
             challenge, evidence_dir / "01-challenge.png"
         )

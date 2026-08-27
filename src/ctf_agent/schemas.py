@@ -127,6 +127,7 @@ class SubmissionVerdict(StrEnum):
     WRONG = "wrong"
     ALREADY_SOLVED = "already_solved"
     RATE_LIMITED = "rate_limited"
+    AUTH_REQUIRED = "auth_required"
     UNKNOWN = "unknown"
 
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,8 +19,18 @@ class SessionConfig:
     user_agent: str = "ctf-agent-codex/0.1"
     timeout_seconds: float = 30.0
     max_redirects: int = 5
+    retry_budget: int = 2
+    rate_limit_per_second: float = 2.0
     cookies_path: Path | None = None
     default_headers: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        if self.retry_budget < 0:
+            raise ValueError("retry_budget must be non-negative")
+        if self.rate_limit_per_second <= 0:
+            raise ValueError("rate_limit_per_second must be positive")
 
 
 class ScopedAsyncSession:
@@ -34,6 +46,8 @@ class ScopedAsyncSession:
         self.config = config or SessionConfig()
         self._owned_client = client is None
         self._request_observer = request_observer
+        self._rate_lock = asyncio.Lock()
+        self._last_request_at = 0.0
         headers = {"User-Agent": self.config.user_agent, **self.config.default_headers}
         self.client = client or httpx.AsyncClient(
             timeout=self.config.timeout_seconds,
@@ -62,8 +76,12 @@ class ScopedAsyncSession:
     async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         self.scope.require(url, context="request URL")
         redirects_remaining = self.config.max_redirects
+        retries_remaining = (
+            self.config.retry_budget if method.upper() in {"GET", "HEAD"} else 0
+        )
         current_url = url
         while True:
+            await self._throttle()
             response = await self.client.request(method, current_url, **kwargs)
             if self._request_observer is not None:
                 self._request_observer(
@@ -74,6 +92,16 @@ class ScopedAsyncSession:
                         "redirect": response.status_code in {301, 302, 303, 307, 308},
                     }
                 )
+            if response.status_code in {408, 425, 429, 500, 502, 503, 504}:
+                if retries_remaining > 0:
+                    retries_remaining -= 1
+                    await asyncio.sleep(
+                        _retry_delay(
+                            response,
+                            self.config.retry_budget - retries_remaining,
+                        )
+                    )
+                    continue
             if response.status_code not in {301, 302, 303, 307, 308}:
                 return response
             location = response.headers.get("location")
@@ -88,6 +116,15 @@ class ScopedAsyncSession:
             kwargs.pop("data", None)
             kwargs.pop("json", None)
             redirects_remaining -= 1
+
+    async def _throttle(self) -> None:
+        interval = 1.0 / self.config.rate_limit_per_second
+        async with self._rate_lock:
+            now = time.monotonic()
+            remaining = interval - (now - self._last_request_at)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            self._last_request_at = time.monotonic()
 
     async def request_json(self, method: str, url: str, **kwargs: Any) -> Mapping[str, Any]:
         response = await self.request(method, url, **kwargs)
@@ -135,3 +172,14 @@ class ScopedAsyncSession:
                 domain=cookie.get("domain"),
                 path=cookie.get("path", "/"),
             )
+
+
+def _retry_delay(response: httpx.Response, attempt: int) -> float:
+    retry_after = response.headers.get("retry-after")
+    if retry_after:
+        try:
+            parsed_retry_after = float(retry_after)
+            return min(max(parsed_retry_after, 0.0), 5.0)
+        except ValueError:
+            pass
+    return float(min(0.25 * (2 ** max(attempt - 1, 0)), 2.0))
