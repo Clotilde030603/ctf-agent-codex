@@ -1,12 +1,12 @@
 # ctf-agent-codex
 
-`ctf-agent-codex` is the project scaffold for a Codex-controlled CTF solving agent. The intended user flow is:
+`ctf-agent-codex` is a deterministic, resumable Codex-controlled CTF solving agent. The user flow is:
 
 ```bash
 ctf-agent solve "https://ctf.example.com/challenges/123" --auto-submit --writeup
 ```
 
-This repository is currently documenting the implementation contract and configuration surface. Until the Python package lands, the command examples below are target behavior rather than verified runnable commands.
+The repository contains an executable vertical slice backed by a fake CTFd end-to-end test. The Python controller alone owns state transitions; model output is schema-validated input to planning and specialist lanes.
 
 ## Goals
 
@@ -75,16 +75,14 @@ Target stack:
 - mypy or pyright
 - Docker for solver sandbox and clean reproduction
 
-Planned local setup:
+Local setup:
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,browser]"
 playwright install chromium
 ```
-
-The setup command is not runnable until packaging files are implemented.
 
 ## Codex Authentication And Model Settings
 
@@ -132,19 +130,19 @@ Solver containers must receive only challenge artifacts, generated solver files,
 
 ## Usage
 
-Target solve command:
+Solve command:
 
 ```bash
 ctf-agent solve "https://ctf.example.com/challenges/123" --auto-submit --writeup
 ```
 
-Target resume command:
+Resume command:
 
 ```bash
 ctf-agent resume <run-id>
 ```
 
-Target benchmark command:
+Benchmark command:
 
 ```bash
 ctf-agent benchmark evals/manifest.yaml
@@ -190,13 +188,15 @@ Details are in [docs/verification.md](docs/verification.md).
 
 ## Evaluation
 
-Benchmarks live under `evals/` once implemented. The runner should report `Solved@15m`, `Solved@30m`, `Solved@60m`, time to Accepted, Wrong submissions, clean reproduction rate, tool calls, model calls, token or cost data, repeat success rate, and write-up fact errors.
+Benchmark manifests can live under `evals/`. The current runner reports `Solved@15m`, `Solved@30m`, `Solved@60m`, elapsed time, Wrong submissions, and clean reproduction status. Model/tool cost counters are reserved fields for model-backed benchmark lanes.
 
 See [docs/evaluation.md](docs/evaluation.md).
 
 ## Known Limitations
 
-- The current documentation/config scaffold does not implement the Python package.
-- Command examples are target CLI contracts until executable code lands.
-- Real CTF credentials, MFA, CAPTCHA, and platform-specific policies require user-controlled authentication.
+- The built-in deterministic specialist completes challenges whose real flag can be derived directly from preserved artifact signals. The Codex backend and parallel scheduler are implemented extension points; deep category-specific exploit generation remains dependent on configured model/tool availability.
+- CTFd is the complete API-first adapter. Generic HTML ingestion cannot submit without a platform-specific endpoint, and rCTF currently inherits the generic adapter surface.
+- Real CTF credentials, MFA, CAPTCHA, and platform policies require user-controlled first authentication. Playwright detects successful login and continues without a terminal Enter prompt.
+- Evidence screenshots require Playwright and an authenticated browser storage state. Runs fail closed rather than claiming complete evidence when captures are missing.
+- Docker is preferred for clean reproduction. If the Docker CLI exists but its daemon is unavailable, the runner records and uses an isolated `python -I` replay as the next-best local check.
 - External tools such as Ghidra, ReVa, binwalk, exiftool, and checksec are optional capabilities and must be detected before use.

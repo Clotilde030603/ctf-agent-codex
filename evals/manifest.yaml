@@ -1,0 +1,4 @@
+challenges:
+  - id: local-retired-warmup
+    command: [python3, fixtures/retired-warmup/solve.py]
+    expected_flag: flag{retired_fixture_only}

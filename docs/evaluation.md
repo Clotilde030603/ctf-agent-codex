@@ -4,27 +4,22 @@ Benchmarks validate autonomous solving quality against retired or local CTF chal
 
 ## Manifest
 
-Target command:
+Command:
 
 ```bash
 ctf-agent benchmark evals/manifest.yaml
 ```
 
-The manifest should identify challenge URLs or local fixtures, expected category, optional known flag hash, time budget, allowed services, and required tools.
+The implemented manifest identifies an offline command and expected flag for each retired or local fixture. Future schema versions can add challenge URLs, expected category, flag hashes, time budgets, allowed services, and required tools.
 
-Example target shape:
+Example:
 
 ```yaml
 challenges:
   - id: local-web-001
-    url: http://127.0.0.1:8080/challenges/1
-    category: web
-    time_budget_seconds: 1800
-    allowed_hosts:
-      - 127.0.0.1
+    command: [python3, fixtures/local-web-001/solve.py]
+    expected_flag: flag{retired_fixture}
 ```
-
-This YAML is an intended contract. It should be tested once the benchmark runner exists.
 
 ## Metrics
 
