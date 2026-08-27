@@ -4,6 +4,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+import click
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from ctf_agent.cli import app
@@ -65,10 +67,21 @@ def test_readme_cli_examples_match_typer_help() -> None:
         "resume": ("--runs-dir", "--challenge-url"),
         "benchmark": (),
     }
+    root_command = get_command(app)
+    assert isinstance(root_command, click.Group)
+    context = click.Context(root_command)
     for command, options in expected.items():
-        result = runner.invoke(app, [command, "--help"], env={"COLUMNS": "160"})
+        result = runner.invoke(app, [command, "--help"])
         assert result.exit_code == 0
-        assert all(option in result.stdout for option in options)
+        subcommand = root_command.get_command(context, command)
+        assert subcommand is not None
+        declared_options = {
+            option
+            for parameter in subcommand.params
+            if isinstance(parameter, click.Option)
+            for option in (*parameter.opts, *parameter.secondary_opts)
+        }
+        assert set(options) <= declared_options
 
     for filename in ("README.md", "README.ko.md"):
         text = (ROOT / filename).read_text(encoding="utf-8")
