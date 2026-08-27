@@ -34,7 +34,13 @@ from ctf_agent.specialists.forensics import ForensicsSpecialist
 from ctf_agent.specialists.model import BackendFactory, ModelSolverSpecialist
 from ctf_agent.specialists.web import StaticWebSpecialist
 from ctf_agent.triage import ScanConfig, classify_report, scan_path
-from ctf_agent.verification import FlagGate, RejectedCandidates, ReplayVerifier, SubmissionBudget
+from ctf_agent.verification import (
+    BlindVerifier,
+    FlagGate,
+    RejectedCandidates,
+    ReplayVerifier,
+    SubmissionBudget,
+)
 from ctf_agent.workers import SharedModelCallBudget
 from ctf_agent.writeup import WriteupGenerator, WriteupValidator
 
@@ -392,24 +398,52 @@ class AutonomousWorkflow:
                     timeout_seconds=self.settings.tool_timeout_seconds,
                 )
                 outcome = verifier.verify(candidate)
-                if outcome.accepted:
-                    verified = candidate.model_copy(
-                        update={
-                            "format_match": True,
-                            "replay_verified": True,
-                            "independent_verified": True,
-                        }
+                if not outcome.accepted:
+                    reasons.append(f"{candidate.value}: replay: {outcome.reason}")
+                    continue
+                blind = BlindVerifier(
+                    context.record.run_dir,
+                    challenge.flag_policy,
+                    solver_path=context.record.run_dir / "solve.py",
+                    timeout_seconds=self.settings.tool_timeout_seconds,
+                ).verify(candidate)
+                if not blind.accepted:
+                    reasons.append(
+                        f"{candidate.value}: {blind.failure_stage}: {blind.reason}"
                     )
-                    context.values["candidate"] = verified
-                    context.values["replay"] = outcome.replay
-                    context.ledger.append(
-                        context.record.run_id,
-                        "flag.verified",
-                        {"accepted": True, "flag": verified.value, "reason": outcome.reason},
-                        state=RunState.VERIFY.value,
-                    )
-                    return StateOutcome(RunState.SUBMIT, {"accepted": True, "flag": verified.value})
-                reasons.append(f"{candidate.value}: {outcome.reason}")
+                    continue
+                verified = candidate.model_copy(
+                    update={
+                        "format_match": True,
+                        "provenance_verified": bool(
+                            blind.provenance and blind.provenance.accepted
+                        ),
+                        "replay_verified": True,
+                        "independent_verified": True,
+                        "submission_allowed": True,
+                    }
+                )
+                context.values["candidate"] = verified
+                context.values["replay"] = outcome.replay
+                context.ledger.append(
+                    context.record.run_id,
+                    "flag.verified",
+                    {
+                        "accepted": True,
+                        "flag": verified.value,
+                        "reason": blind.reason,
+                        "format_match": verified.format_match,
+                        "provenance_verified": verified.provenance_verified,
+                        "replay_verified": verified.replay_verified,
+                        "independent_verified": verified.independent_verified,
+                        "submission_allowed": verified.submission_allowed,
+                    },
+                    state=RunState.VERIFY.value,
+                )
+                return StateOutcome(
+                    RunState.SUBMIT,
+                    {"accepted": True, "flag": verified.value},
+                )
         context.ledger.append(
             context.record.run_id,
             "flag.verification_failed",
@@ -423,8 +457,46 @@ class AutonomousWorkflow:
 
     async def submit(self, context: RunContext) -> StateOutcome:
         candidate = self._candidate(context)
+        required_checks = {
+            "format_match": candidate.format_match,
+            "provenance_verified": candidate.provenance_verified,
+            "replay_verified": candidate.replay_verified,
+            "independent_verified": candidate.independent_verified,
+            "submission_allowed": candidate.submission_allowed,
+        }
+        failed_checks = [name for name, passed in required_checks.items() if not passed]
+        if failed_checks:
+            raise RuntimeError(
+                "submission blocked by incomplete verification: "
+                + ", ".join(failed_checks)
+            )
         if not context.record.auto_submit:
-            raise RuntimeError("verified candidate is ready, but --auto-submit was not enabled")
+            output = context.record.run_dir / "verified-candidate.json"
+            _write_json(
+                output,
+                {
+                    "status": "verified_not_submitted",
+                    "candidate": candidate.model_dump(mode="json"),
+                    "instructions": "review this private run artifact before manual submission",
+                },
+            )
+            context.ledger.append(
+                context.record.run_id,
+                "flag.ready",
+                {
+                    "candidate_path": str(output.relative_to(context.record.run_dir)),
+                    **required_checks,
+                },
+                state=RunState.READY.value,
+            )
+            return StateOutcome(
+                RunState.READY,
+                {
+                    "verified": True,
+                    "submitted": False,
+                    "candidate_path": str(output),
+                },
+            )
         previous_verdict = context.store.latest_submission_verdict(
             context.record.run_id, candidate.value
         )
@@ -647,8 +719,10 @@ class AutonomousWorkflow:
                     verified = candidate.model_copy(
                         update={
                             "format_match": True,
+                            "provenance_verified": True,
                             "replay_verified": True,
                             "independent_verified": True,
+                            "submission_allowed": True,
                         }
                     )
                     context.values["candidate"] = verified

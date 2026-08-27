@@ -25,6 +25,7 @@ class RunState(StrEnum):
     EVIDENCE = "EVIDENCE"
     WRITEUP = "WRITEUP"
     REPRODUCE = "REPRODUCE"
+    READY = "READY"
     DONE = "DONE"
     FAILED = "FAILED"
 
@@ -95,8 +96,10 @@ class FlagCandidate(BaseModel):
     derivation: list[str] = Field(default_factory=list)
     solver_command: str
     format_match: bool = False
+    provenance_verified: bool = False
     replay_verified: bool = False
     independent_verified: bool = False
+    submission_allowed: bool = False
     confidence: float = Field(default=0, ge=0, le=1)
 
     @field_validator("value")

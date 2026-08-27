@@ -1,16 +1,27 @@
 """Flag verification primitives for ctf-agent-codex."""
 
+from .blind import BlindVerificationOutcome, BlindVerifier
 from .candidate import FlagCandidate, Provenance
-from .flag_gate import FlagGate, FlagGateDecision, FlagPolicy, RejectedCandidates, SubmissionBudget
+from .flag_gate import (
+    FlagGate,
+    FlagGateDecision,
+    FlagPolicy,
+    RejectedCandidates,
+    SubmissionBudget,
+)
 from .independent_review import (
     GateVerifier,
     IndependentVerifier,
     ReplayVerifier,
     VerificationOutcome,
 )
+from .provenance import ProvenanceCheck, ProvenanceVerifier
 from .replay import ReplayResult, replay_solver
+from .solver_static import SolverHardcodeCheck, SolverStaticAnalyzer
 
 __all__ = [
+    "BlindVerificationOutcome",
+    "BlindVerifier",
     "FlagCandidate",
     "FlagGate",
     "FlagGateDecision",
@@ -18,9 +29,13 @@ __all__ = [
     "GateVerifier",
     "IndependentVerifier",
     "Provenance",
+    "ProvenanceCheck",
+    "ProvenanceVerifier",
     "RejectedCandidates",
     "ReplayResult",
     "ReplayVerifier",
+    "SolverHardcodeCheck",
+    "SolverStaticAnalyzer",
     "SubmissionBudget",
     "VerificationOutcome",
     "replay_solver",

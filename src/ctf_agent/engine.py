@@ -125,7 +125,11 @@ class Controller:
 
     async def execute(self, context: RunContext) -> RunRecord:
         steps = 0
-        while context.record.state not in {RunState.DONE, RunState.FAILED}:
+        while context.record.state not in {
+            RunState.DONE,
+            RunState.READY,
+            RunState.FAILED,
+        }:
             steps += 1
             if steps > self.settings.max_state_steps:
                 context.record = context.store.transition(

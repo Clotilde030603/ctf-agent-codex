@@ -58,6 +58,7 @@ def test_readme_cli_examples_match_typer_help() -> None:
     expected = {
         "solve": (
             "--auto-submit",
+            "--dry-run",
             "--backend",
             "--planner-model",
             "--solver-model",
@@ -88,6 +89,13 @@ def test_readme_cli_examples_match_typer_help() -> None:
             for option in (*parameter.opts, *parameter.secondary_opts)
         }
         assert set(options) <= declared_options
+
+    conflict = runner.invoke(
+        app,
+        ["solve", "https://ctf.test/challenges/1", "--auto-submit", "--dry-run"],
+    )
+    assert conflict.exit_code != 0
+    assert "mutually exclusive" in (conflict.stdout + conflict.stderr)
 
     for filename in ("README.md", "README.ko.md"):
         text = (ROOT / filename).read_text(encoding="utf-8")

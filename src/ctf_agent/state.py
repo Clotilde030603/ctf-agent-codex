@@ -16,10 +16,17 @@ FORWARD_TRANSITIONS: dict[RunState, set[RunState]] = {
     RunState.PLAN: {RunState.SOLVE, RunState.FAILED},
     RunState.SOLVE: {RunState.VERIFY, RunState.PLAN, RunState.FAILED},
     RunState.VERIFY: {RunState.SUBMIT, RunState.SOLVE, RunState.PLAN, RunState.FAILED},
-    RunState.SUBMIT: {RunState.EVIDENCE, RunState.PLAN, RunState.TRIAGE, RunState.FAILED},
+    RunState.SUBMIT: {
+        RunState.EVIDENCE,
+        RunState.READY,
+        RunState.PLAN,
+        RunState.TRIAGE,
+        RunState.FAILED,
+    },
     RunState.EVIDENCE: {RunState.WRITEUP, RunState.REPRODUCE, RunState.FAILED},
     RunState.WRITEUP: {RunState.REPRODUCE, RunState.SOLVE, RunState.FAILED},
     RunState.REPRODUCE: {RunState.DONE, RunState.WRITEUP, RunState.SOLVE, RunState.FAILED},
+    RunState.READY: set(),
     RunState.DONE: set(),
     RunState.FAILED: {RunState.AUTHENTICATE},
 }

@@ -221,3 +221,73 @@ async def test_verification_rejection_returns_to_plan(tmp_path: Path) -> None:
 
     assert outcome.target is RunState.PLAN
     assert outcome.payload["accepted"] is False
+
+
+@pytest.mark.asyncio
+async def test_verified_dry_run_stops_cleanly_in_ready_state(tmp_path: Path) -> None:
+    adapter = FakeCTFdAdapter()
+    workflow = AutonomousWorkflow(
+        Settings(
+            backend="static",
+            runs_dir=tmp_path / "runs",
+            allow_local_reproduction=True,
+        ),
+        adapter,
+    )
+    context = workflow.controller().create_run(
+        "https://ctf.test/challenges/7", auto_submit=False, writeup=False
+    )
+
+    result = await workflow.controller().execute(context)
+
+    assert result.state is RunState.READY, result.last_error
+    assert adapter.submitted == []
+    artifact = json.loads((result.run_dir / "verified-candidate.json").read_text())
+    candidate = artifact["candidate"]
+    assert candidate["format_match"] is True
+    assert candidate["provenance_verified"] is True
+    assert candidate["replay_verified"] is True
+    assert candidate["independent_verified"] is True
+    assert candidate["submission_allowed"] is True
+
+
+@pytest.mark.asyncio
+async def test_blind_gate_rejects_hardcoded_solver_in_workflow(tmp_path: Path) -> None:
+    workflow = AutonomousWorkflow(
+        Settings(backend="static", runs_dir=tmp_path / "runs"),
+        FakeCTFdAdapter(),
+    )
+    context = workflow.controller().create_run(
+        "https://ctf.test/challenges/10", auto_submit=True, writeup=False
+    )
+    source = context.record.run_dir / "files" / "payload.txt"
+    source.write_text("flag{hardcoded_workflow}\n", encoding="utf-8")
+    (context.record.run_dir / "solve.py").write_text(
+        "print('flag{hardcoded_workflow}')\n", encoding="utf-8"
+    )
+    context.values["challenge"] = Challenge(
+        id="10",
+        url="https://ctf.test/challenges/10",
+        title="Hardcoded",
+        flag_policy=FlagPolicy(pattern=r"flag\{[^{}]+\}"),
+    )
+    context.values["specialist_results"] = [
+        SpecialistResult(
+            hypothesis_id="H1",
+            status="confirmed",
+            flag_candidates=[
+                FlagCandidate(
+                    value="flag{hardcoded_workflow}",
+                    source_artifact="files/payload.txt",
+                    source_location="line 1",
+                    derivation=["fixture"],
+                    solver_command="python3 solve.py",
+                )
+            ],
+        )
+    ]
+
+    outcome = await workflow.verify(context)
+
+    assert outcome.target is RunState.PLAN
+    assert any("hardcode" in reason for reason in outcome.payload["reasons"])

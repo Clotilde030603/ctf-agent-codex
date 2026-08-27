@@ -26,6 +26,7 @@ def solve(
     reasoning_effort: Annotated[str | None, typer.Option("--reasoning-effort")] = None,
     max_workers: Annotated[int, typer.Option("--max-workers", min=1, max=3)] = 3,
     auto_submit: Annotated[bool, typer.Option("--auto-submit")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     writeup: Annotated[bool, typer.Option("--writeup/--no-writeup")] = True,
     runs_dir: Annotated[Path, typer.Option("--runs-dir")] = Path("runs"),
     allow_private_host: Annotated[bool, typer.Option("--allow-private-host")] = False,
@@ -34,6 +35,8 @@ def solve(
     ] = False,
 ) -> None:
     """Create and execute a new challenge run."""
+    if auto_submit and dry_run:
+        raise typer.BadParameter("--auto-submit and --dry-run are mutually exclusive")
     defaults = Settings()
     settings = Settings.model_validate(
         {
@@ -53,7 +56,11 @@ def solve(
     )
     workflow = AutonomousWorkflow(settings)
     controller = workflow.controller()
-    context = controller.create_run(url, auto_submit=auto_submit, writeup=writeup)
+    context = controller.create_run(
+        url,
+        auto_submit=auto_submit and not dry_run,
+        writeup=writeup,
+    )
     result = asyncio.run(controller.execute(context))
     typer.echo(
         json.dumps(
