@@ -1,6 +1,7 @@
 from .core import (
     CommandPolicy,
     LaneWorkspace,
+    MultipartUpload,
     SharedModelCallBudget,
     WorkerBudget,
     WorkerCore,
@@ -12,6 +13,7 @@ from .core import (
 __all__ = [
     "CommandPolicy",
     "LaneWorkspace",
+    "MultipartUpload",
     "SharedModelCallBudget",
     "WorkerBudget",
     "WorkerCore",

@@ -80,6 +80,7 @@ class ScopedAsyncSession:
             self.config.retry_budget if method.upper() in {"GET", "HEAD"} else 0
         )
         current_url = url
+        redirect_chain: list[dict[str, Any]] = []
         while True:
             await self._throttle()
             response = await self.client.request(method, current_url, **kwargs)
@@ -92,6 +93,13 @@ class ScopedAsyncSession:
                         "redirect": response.status_code in {301, 302, 303, 307, 308},
                     }
                 )
+            redirect_chain.append(
+                {
+                    "method": method,
+                    "url": str(response.request.url),
+                    "status_code": response.status_code,
+                }
+            )
             if response.status_code in {408, 425, 429, 500, 502, 503, 504}:
                 if retries_remaining > 0:
                     retries_remaining -= 1
@@ -103,9 +111,11 @@ class ScopedAsyncSession:
                     )
                     continue
             if response.status_code not in {301, 302, 303, 307, 308}:
+                response.extensions["ctf_redirect_chain"] = redirect_chain
                 return response
             location = response.headers.get("location")
             if not location:
+                response.extensions["ctf_redirect_chain"] = redirect_chain
                 return response
             if redirects_remaining <= 0:
                 raise httpx.TooManyRedirects("redirect limit exceeded", request=response.request)
@@ -115,6 +125,7 @@ class ScopedAsyncSession:
             kwargs.pop("content", None)
             kwargs.pop("data", None)
             kwargs.pop("json", None)
+            kwargs.pop("files", None)
             redirects_remaining -= 1
 
     async def _throttle(self) -> None:

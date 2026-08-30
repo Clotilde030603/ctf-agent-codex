@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from ctf_agent.benchmark import benchmark
+from ctf_agent.benchmark import _derive_event_metrics, benchmark
 
 
 def test_yaml_benchmark_manifest_repeats_in_fresh_copies(tmp_path: Path) -> None:
@@ -138,6 +138,61 @@ challenges:
     assert self_reported["tool_calls"] == 1
     assert self_reported["hallucinated_candidates"] == 1
     assert self_reported["candidate_count"] == 1
+    assert self_reported["replay_verified"] is None
+
+
+def test_event_metrics_require_explicit_success_and_completed_resume() -> None:
+    missing = _derive_event_metrics(
+        [
+            {"type": "solver.replayed", "payload": {}},
+            {"type": "independent.verified", "payload": {}},
+            {"type": "writeup.validated", "payload": {}},
+            {"type": "run.resumed", "payload": {}},
+        ]
+    )
+
+    assert missing["replay_verified"] is None
+    assert missing["independent_verified"] is None
+    assert missing["writeup_validated"] is None
+    assert missing["resume_verified"] is None
+
+    explicit = _derive_event_metrics(
+        [
+            {"type": "run.resumed", "payload": {}},
+            {"type": "model.request", "payload": {}},
+            {"type": "worker.command", "payload": {"accepted": True}},
+            {"type": "worker.http_request", "payload": {"accepted": True}},
+            {"type": "flag.candidate", "seconds": 1.0, "payload": {}},
+            {"type": "flag.rejected", "payload": {}},
+            {
+                "type": "flag.verified",
+                "seconds": 2.0,
+                "payload": {
+                    "accepted": True,
+                    "replay_verified": True,
+                    "data_dependency_verified": True,
+                    "independent_verified": True,
+                },
+            },
+            {"type": "evidence.captured", "payload": {"accepted": True}},
+            {"type": "writeup.validated", "payload": {"accepted": True}},
+            {"type": "state.transition", "payload": {"to": "DONE"}},
+        ]
+    )
+
+    assert explicit["model_calls"] == 1
+    assert explicit["tool_calls"] == 2
+    assert explicit["candidate_count"] == 1
+    assert explicit["rejected_candidates"] == 1
+    assert explicit["time_to_candidate_seconds"] == 1.0
+    assert explicit["time_to_verified_seconds"] == 2.0
+    assert explicit["replay_verified"] is True
+    assert explicit["data_dependency_verified"] is True
+    assert explicit["independent_verified"] is True
+    assert explicit["evidence_completed"] is True
+    assert explicit["writeup_validated"] is True
+    assert explicit["resume_verified"] is True
+    assert explicit["total_run_status"] == "DONE"
 
 
 def test_benchmark_rejects_raw_expected_flag_in_solver_source(tmp_path: Path) -> None:

@@ -6,6 +6,8 @@ import hashlib
 import html
 import json
 import shutil
+import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit
@@ -297,6 +299,7 @@ class AutonomousWorkflow:
                     state=RunState.PLAN.value,
                 )
                 try:
+                    planner_started = time.monotonic()
                     hypotheses = list(
                         await planner.plan(self._planning_context(context, triage_data))
                     )
@@ -308,6 +311,9 @@ class AutonomousWorkflow:
                             "role": "planner",
                             "error_type": type(exc).__name__,
                             "message": str(exc),
+                            "elapsed_seconds": round(
+                                time.monotonic() - planner_started, 6
+                            ),
                         },
                         state=RunState.PLAN.value,
                     )
@@ -322,6 +328,9 @@ class AutonomousWorkflow:
                             "role": "planner",
                             "model": self.settings.planner_model,
                             "hypothesis_count": len(hypotheses),
+                            "elapsed_seconds": round(
+                                time.monotonic() - planner_started, 6
+                            ),
                         },
                         state=RunState.PLAN.value,
                     )
@@ -379,22 +388,26 @@ class AutonomousWorkflow:
                 0, self.settings.model_call_budget - existing_model_requests
             )
 
-            def record_solver_call(index: int) -> None:
+            def record_solver_event(
+                event_type: str, payload: Mapping[str, Any]
+            ) -> None:
                 context.ledger.append(
                     context.record.run_id,
-                    "model.request",
-                    {
-                        "role": "solver",
-                        "model": self.settings.solver_model,
-                        "request_index": existing_model_requests + index,
-                    },
+                    event_type,
+                    dict(payload) | {"model": self.settings.solver_model},
                     state=RunState.SOLVE.value,
+                    idempotency_key=(
+                        "flag-candidate:" + str(payload.get("candidate_sha256"))
+                        if event_type == "flag.candidate"
+                        and payload.get("candidate_sha256")
+                        else None
+                    ),
                 )
 
             shared_model_budget = SharedModelCallBudget(
                 remaining_model_calls,
-                on_reserve=record_solver_call,
             )
+            solver_context["event_observer"] = record_solver_event
             model_specialist = ModelSolverSpecialist(
                 self.settings,
                 backend_factory=self._solver_backend_factory,
@@ -470,11 +483,18 @@ class AutonomousWorkflow:
                     "flag.candidate",
                     {
                         "hypothesis_id": result.hypothesis_id,
+                        "candidate_sha256": hashlib.sha256(
+                            candidate.value.encode()
+                        ).hexdigest(),
                         "source_artifact": candidate.source_artifact,
                         "source_location": candidate.source_location,
                         "confidence": candidate.confidence,
                     },
                     state=RunState.VERIFY.value,
+                    idempotency_key=(
+                        "flag-candidate:"
+                        + hashlib.sha256(candidate.value.encode()).hexdigest()
+                    ),
                 )
                 if context.store.is_rejected(context.record.run_id, candidate.value):
                     rejected.add(candidate.value)
@@ -534,6 +554,7 @@ class AutonomousWorkflow:
                         },
                         state=RunState.VERIFY.value,
                     )
+                    reviewer_started = time.monotonic()
                     review = await ModelBlindReviewer(
                         self.settings,
                         context.record.run_dir,
@@ -555,6 +576,9 @@ class AutonomousWorkflow:
                                 "derived_candidate_count": len(
                                     review.derived_candidates
                                 ),
+                                "elapsed_seconds": round(
+                                    time.monotonic() - reviewer_started, 6
+                                ),
                             },
                             state=RunState.VERIFY.value,
                         )
@@ -571,6 +595,9 @@ class AutonomousWorkflow:
                             "role": "verifier",
                             "model": self.settings.verifier_model,
                             "derived_candidate_count": len(review.derived_candidates),
+                            "elapsed_seconds": round(
+                                time.monotonic() - reviewer_started, 6
+                            ),
                         },
                         state=RunState.VERIFY.value,
                     )
@@ -651,6 +678,13 @@ class AutonomousWorkflow:
             {"reasons": reasons},
             state=RunState.VERIFY.value,
         )
+        for reason in reasons:
+            context.ledger.append(
+                context.record.run_id,
+                "flag.rejected",
+                {"reason": reason},
+                state=RunState.VERIFY.value,
+            )
         return StateOutcome(
             RunState.PLAN,
             {"accepted": False, "reasons": reasons},

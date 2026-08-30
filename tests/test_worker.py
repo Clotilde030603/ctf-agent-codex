@@ -35,6 +35,16 @@ def test_worker_decision_schema_rejects_shell_strings() -> None:
         WorkerDecision.model_validate(
             {"action": "write_file", "path": "../x", "content": "x", "argv": ["python3"]}
         )
+    with pytest.raises(ValidationError):
+        WorkerDecision.model_validate(
+            {
+                "action": "http_request",
+                "method": "POST",
+                "url": "https://challenge.test/",
+                "body": "raw",
+                "json_body": {"duplicate": True},
+            }
+        )
     assert WorkerDecision.model_validate({"action": "finish", "message": "ok"}).action == "finish"
     with pytest.raises(ValidationError):
         WorkerDecision.model_validate(
@@ -100,6 +110,107 @@ def test_worker_http_action_is_host_scoped_and_sanitized(tmp_path: Path) -> None
     assert "supersecret" not in response_text
     assert second.status == "failed"
     assert "outside allowed scope" in second.message
+
+
+def test_worker_http_supports_query_json_redirects_and_instrumentation(
+    tmp_path: Path,
+) -> None:
+    async def run() -> tuple[Any, list[tuple[str, dict[str, Any]]]]:
+        async def respond(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/start":
+                return httpx.Response(
+                    307,
+                    headers={"location": "/finish"},
+                    request=request,
+                )
+            return httpx.Response(200, json={"ok": True}, request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        session = ScopedAsyncSession(
+            HostScope.from_url("https://challenge.test"),
+            config=SessionConfig(rate_limit_per_second=1000),
+            client=client,
+        )
+        events: list[tuple[str, dict[str, Any]]] = []
+        backend = QueueBackend(
+            [
+                {
+                    "action": "http_request",
+                    "method": "PATCH",
+                    "url": "https://challenge.test/start",
+                    "query_params": {"mode": "test"},
+                    "json_body": {"value": 7},
+                },
+                {"action": "finish", "message": "done"},
+            ]
+        )
+        worker = WorkerCore(
+            backend,
+            LaneWorkspace(tmp_path / "lane"),
+            budget=WorkerBudget(max_steps=3),
+            http_session=session,
+            event_observer=lambda kind, payload: events.append((kind, dict(payload))),
+        )
+        try:
+            return await worker.run("structured request"), events
+        finally:
+            await client.aclose()
+
+    result, events = asyncio.run(run())
+
+    report = result.reports[0]
+    assert report.status_code == 200
+    assert [item["status_code"] for item in report.redirect_chain] == [307, 200]
+    assert any(kind == "worker.http_request" for kind, _payload in events)
+    assert sum(kind == "model.request" for kind, _payload in events) == 2
+    assert sum(kind == "model.completed" for kind, _payload in events) == 2
+
+
+def test_failed_http_attempt_remains_retryable_and_multipart_is_confined(
+    tmp_path: Path,
+) -> None:
+    async def run() -> Any:
+        attempts = 0
+
+        async def respond(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise httpx.ConnectError("transient", request=request)
+            assert b'name="upload"' in request.content
+            assert b"fixture-bytes" in request.content
+            return httpx.Response(200, text="uploaded", request=request)
+
+        challenge = tmp_path / "challenge"
+        challenge.mkdir()
+        (challenge / "sample.bin").write_bytes(b"fixture-bytes")
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        session = ScopedAsyncSession(
+            HostScope.from_url("https://challenge.test"),
+            config=SessionConfig(rate_limit_per_second=1000),
+            client=client,
+        )
+        decision = {
+            "action": "http_request",
+            "method": "POST",
+            "url": "https://challenge.test/upload",
+            "multipart": [{"field_name": "upload", "path": "challenge/sample.bin"}],
+        }
+        worker = WorkerCore(
+            QueueBackend([decision, decision, {"action": "finish", "message": "done"}]),
+            LaneWorkspace(tmp_path / "lane", challenge_files=challenge),
+            budget=WorkerBudget(max_steps=4, max_no_progress_steps=3),
+            http_session=session,
+        )
+        try:
+            return await worker.run("retry upload")
+        finally:
+            await client.aclose()
+
+    result = asyncio.run(run())
+
+    assert [report.status for report in result.reports[:2]] == ["failed", "ok"]
+    assert result.http_requests_run == 1
 
 
 def test_lane_workspace_enforces_relative_paths(tmp_path: Path) -> None:

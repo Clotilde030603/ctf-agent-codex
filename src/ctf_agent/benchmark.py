@@ -31,12 +31,17 @@ class BenchmarkMetrics(BaseModel):
     tool_calls: int = Field(default=0, ge=0)
     hallucinated_candidates: int = Field(default=0, ge=0)
     candidate_count: int = Field(default=0, ge=0)
+    rejected_candidates: int = Field(default=0, ge=0)
     time_to_candidate_seconds: float | None = Field(default=None, ge=0)
+    time_to_verified_seconds: float | None = Field(default=None, ge=0)
     time_to_accepted_seconds: float | None = Field(default=None, ge=0)
     replay_verified: bool | None = None
     independent_verified: bool | None = None
+    data_dependency_verified: bool | None = None
+    evidence_completed: bool | None = None
     writeup_validated: bool | None = None
     resume_verified: bool | None = None
+    total_run_status: str | None = None
 
 
 class BenchmarkChallenge(BaseModel):
@@ -125,9 +130,12 @@ class BenchmarkChallengeRecord(BaseModel):
     tool_calls: int
     hallucinated_candidate_rate: float | None
     time_to_candidate_seconds: float | None
+    time_to_verified_seconds: float | None
     time_to_accepted_seconds: float | None
     replay_verified_rate: float | None
     independent_verified_rate: float | None
+    data_dependency_verified_rate: float | None
+    evidence_completion_rate: float | None
     writeup_validated_rate: float | None
     resume_verified_rate: float | None
     runs: list[BenchmarkRunRecord]
@@ -144,6 +152,8 @@ class BenchmarkReport(BaseModel):
     clean_reproduction_rate: float | None
     replay_verified_rate: float | None
     independent_verified_rate: float | None
+    data_dependency_verified_rate: float | None
+    evidence_completion_rate: float | None
     writeup_validated_rate: float | None
     resume_verified_rate: float | None
     wrong_submissions: int
@@ -197,6 +207,8 @@ async def run_benchmark(manifest: Path) -> dict[str, Any]:
         clean_reproduction_rate=_rate(replay_successes),
         replay_verified_rate=_metric_rate(runs, "replay_verified"),
         independent_verified_rate=_metric_rate(runs, "independent_verified"),
+        data_dependency_verified_rate=_metric_rate(runs, "data_dependency_verified"),
+        evidence_completion_rate=_metric_rate(runs, "evidence_completed"),
         writeup_validated_rate=_metric_rate(runs, "writeup_validated"),
         resume_verified_rate=_metric_rate(runs, "resume_verified"),
         wrong_submissions=sum(item.wrong_submissions for item in challenge_records),
@@ -257,9 +269,14 @@ async def _run_challenge(
         time_to_candidate_seconds=_median(
             run.metrics.time_to_candidate_seconds for run in runs
         ),
+        time_to_verified_seconds=_median(
+            run.metrics.time_to_verified_seconds for run in runs
+        ),
         time_to_accepted_seconds=_median(run.metrics.time_to_accepted_seconds for run in runs),
         replay_verified_rate=_metric_rate(runs, "replay_verified"),
         independent_verified_rate=_metric_rate(runs, "independent_verified"),
+        data_dependency_verified_rate=_metric_rate(runs, "data_dependency_verified"),
+        evidence_completion_rate=_metric_rate(runs, "evidence_completed"),
         writeup_validated_rate=_metric_rate(runs, "writeup_validated"),
         resume_verified_rate=_metric_rate(runs, "resume_verified"),
         runs=runs,
@@ -662,12 +679,18 @@ def _derive_event_metrics(events: Iterable[Mapping[str, Any]]) -> Mapping[str, A
     tool_calls = 0
     hallucinated_candidates = 0
     candidate_count = 0
+    rejected_candidates = 0
     first_candidate: float | None = None
+    first_verified: float | None = None
     first_accepted: float | None = None
     replay_verified: bool | None = None
     independent_verified: bool | None = None
+    data_dependency_verified: bool | None = None
+    evidence_completed: bool | None = None
     writeup_validated: bool | None = None
     resume_verified: bool | None = None
+    resume_seen = False
+    total_run_status: str | None = None
 
     for event in events:
         event_type = str(event.get("type") or event.get("event_type") or event.get("stage") or "")
@@ -683,6 +706,7 @@ def _derive_event_metrics(events: Iterable[Mapping[str, Any]]) -> Mapping[str, A
             "tool.run",
             "tool.called",
             "worker.command",
+            "worker.http_request",
             "worker.tool",
             "worker.tool_call",
         }:
@@ -693,19 +717,46 @@ def _derive_event_metrics(events: Iterable[Mapping[str, Any]]) -> Mapping[str, A
                 hallucinated_candidates += 1
             if first_candidate is None:
                 first_candidate = seconds
+        if event_type in {"flag.rejected", "candidate.rejected"}:
+            rejected_candidates += 1
         if event_type in {"flag.submitted", "submission"} and verdict in {
             "accepted",
             "already_solved",
         } and first_accepted is None:
             first_accepted = seconds
-        if event_type in {"solver.replayed", "flag.verified"}:
-            replay_verified = bool(payload.get("accepted", True))
-        if event_type in {"flag.verified", "independent.verified"}:
-            independent_verified = bool(payload.get("accepted", True))
+        if event_type == "solver.replayed" and isinstance(payload.get("accepted"), bool):
+            replay_verified = payload["accepted"] is True
+        if event_type == "flag.verified":
+            if isinstance(payload.get("replay_verified"), bool):
+                replay_verified = payload["replay_verified"] is True
+            if isinstance(payload.get("data_dependency_verified"), bool):
+                data_dependency_verified = payload["data_dependency_verified"] is True
+            if isinstance(payload.get("independent_verified"), bool):
+                independent_verified = payload["independent_verified"] is True
+            if payload.get("accepted") is True and first_verified is None:
+                first_verified = seconds
+        if event_type == "independent.verified" and isinstance(
+            payload.get("accepted"), bool
+        ):
+            independent_verified = payload["accepted"] is True
         if event_type in {"writeup.validated", "writeup"}:
-            writeup_validated = bool(payload.get("accepted", payload.get("ok", True)))
-        if event_type in {"run.resumed", "resume.verified"}:
+            explicit = payload.get("accepted", payload.get("ok"))
+            if isinstance(explicit, bool):
+                writeup_validated = explicit
+        if event_type in {"evidence.captured", "evidence.completed"} and isinstance(
+            payload.get("accepted"), bool
+        ):
+            evidence_completed = payload["accepted"] is True
+        if event_type == "run.resumed":
+            resume_seen = True
+        if event_type == "resume.verified" and payload.get("accepted") is True:
             resume_verified = True
+        if event_type == "state.transition":
+            target = str(payload.get("to", ""))
+            if target in {"DONE", "DONE_WITH_WARNINGS", "READY"}:
+                total_run_status = target
+                if resume_seen:
+                    resume_verified = True
 
     return {
         "wrong_submissions": wrong,
@@ -713,12 +764,17 @@ def _derive_event_metrics(events: Iterable[Mapping[str, Any]]) -> Mapping[str, A
         "tool_calls": tool_calls,
         "hallucinated_candidates": hallucinated_candidates,
         "candidate_count": candidate_count,
+        "rejected_candidates": rejected_candidates,
         "time_to_candidate_seconds": first_candidate,
+        "time_to_verified_seconds": first_verified,
         "time_to_accepted_seconds": first_accepted,
         "replay_verified": replay_verified,
         "independent_verified": independent_verified,
+        "data_dependency_verified": data_dependency_verified,
+        "evidence_completed": evidence_completed,
         "writeup_validated": writeup_validated,
         "resume_verified": resume_verified,
+        "total_run_status": total_run_status,
     }
 
 

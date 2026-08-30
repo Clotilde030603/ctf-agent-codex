@@ -22,6 +22,13 @@ WorkerAction = Literal["run", "write_file", "http_request", "finish"]
 WorkerStatus = Literal["finished", "budget_exhausted", "error"]
 
 
+class MultipartUpload(BaseModel):
+    field_name: str = Field(min_length=1, max_length=128)
+    path: str = Field(min_length=1)
+    filename: str | None = None
+    content_type: str = "application/octet-stream"
+
+
 class WorkerDecision(BaseModel):
     """Single model-selected worker action.
 
@@ -36,10 +43,16 @@ class WorkerDecision(BaseModel):
     argv: list[str] = Field(default_factory=list)
     path: str | None = None
     content: str | None = None
-    method: Literal["GET", "HEAD", "POST"] | None = None
+    method: Literal[
+        "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"
+    ] | None = None
     url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
     body: str | None = None
+    query_params: dict[str, str | list[str]] = Field(default_factory=dict)
+    json_body: dict[str, Any] | list[Any] | None = None
+    form_body: dict[str, str] = Field(default_factory=dict)
+    multipart: list[MultipartUpload] = Field(default_factory=list)
     message: str = ""
     facts: list[str] = Field(default_factory=list)
     flag_candidates: list[FlagCandidate] = Field(default_factory=list)
@@ -59,16 +72,23 @@ class WorkerDecision(BaseModel):
         sensitive_headers = {"authorization", "cookie", "proxy-authorization"}
         if sensitive_headers.intersection(name.lower() for name in self.headers):
             raise ValueError("model-supplied credential headers are not allowed")
+        request_fields_present = bool(
+            self.method
+            or self.url
+            or self.headers
+            or self.body is not None
+            or self.query_params
+            or self.json_body is not None
+            or self.form_body
+            or self.multipart
+        )
         if self.action == "run":
             if not self.argv:
                 raise ValueError("run action requires argv")
             if (
                 self.path is not None
                 or self.content is not None
-                or self.method is not None
-                or self.url is not None
-                or self.headers
-                or self.body is not None
+                or request_fields_present
             ):
                 raise ValueError("run action may not include unrelated fields")
         elif self.action == "write_file":
@@ -78,10 +98,7 @@ class WorkerDecision(BaseModel):
                 raise ValueError("write_file action requires content")
             if (
                 self.argv
-                or self.method is not None
-                or self.url is not None
-                or self.headers
-                or self.body is not None
+                or request_fields_present
             ):
                 raise ValueError("write_file action may not include unrelated fields")
         elif self.action == "http_request":
@@ -89,17 +106,24 @@ class WorkerDecision(BaseModel):
                 raise ValueError("http_request action requires method and url")
             if self.argv or self.path is not None or self.content is not None:
                 raise ValueError("http_request may not include argv/path/content")
-            if self.method in {"GET", "HEAD"} and self.body is not None:
+            body_kinds = sum(
+                (
+                    self.body is not None,
+                    self.json_body is not None,
+                    bool(self.form_body),
+                    bool(self.multipart),
+                )
+            )
+            if body_kinds > 1:
+                raise ValueError("HTTP action accepts only one body representation")
+            if self.method in {"GET", "HEAD"} and body_kinds:
                 raise ValueError(f"{self.method} action may not include a body")
         elif self.action == "finish":
             if (
                 self.argv
                 or self.path is not None
                 or self.content is not None
-                or self.method is not None
-                or self.url is not None
-                or self.headers
-                or self.body is not None
+                or request_fields_present
             ):
                 raise ValueError("finish action may not include action-specific fields")
         return self
@@ -115,6 +139,8 @@ class WorkerBudget(BaseModel):
     max_no_progress_steps: int = Field(default=3, ge=1, le=50)
     stdout_limit: int = Field(default=512_000, ge=1024)
     stderr_limit: int = Field(default=512_000, ge=1024)
+    response_header_limit: int = Field(default=64_000, ge=1024)
+    multipart_file_limit: int = Field(default=16_000_000, ge=1024)
 
 
 class CommandPolicy(BaseModel):
@@ -162,6 +188,7 @@ class WorkerReport(BaseModel):
     url: str | None = None
     status_code: int | None = None
     response_artifact: str | None = None
+    redirect_chain: list[dict[str, Any]] = Field(default_factory=list)
     facts: list[str] = Field(default_factory=list)
     flag_candidates: list[FlagCandidate] = Field(default_factory=list)
     made_progress: bool = False
@@ -252,6 +279,7 @@ class WorkerCore:
         sanitizer: SecretSanitizer | None = None,
         shared_model_budget: SharedModelCallBudget | None = None,
         http_session: ScopedAsyncSession | None = None,
+        event_observer: Callable[[str, Mapping[str, Any]], None] | None = None,
     ) -> None:
         self.backend = backend
         self.workspace = workspace
@@ -260,6 +288,7 @@ class WorkerCore:
         self.sanitizer = sanitizer or SecretSanitizer()
         self.shared_model_budget = shared_model_budget
         self.http_session = http_session
+        self.event_observer = event_observer
         self._seen_commands: set[str] = set()
         self._seen_facts: set[str] = set()
         self._seen_candidates: set[str] = set()
@@ -308,9 +337,22 @@ class WorkerCore:
                         http_requests_run,
                     )
             model_calls += 1
+            self._emit(
+                "model.request",
+                {"role": "solver", "worker_step": step, "request_index": model_calls},
+            )
             try:
                 decision = await self._next_decision(task, context_dict, reports)
             except (ModelBackendError, ValueError) as exc:
+                self._emit(
+                    "model.failure",
+                    {
+                        "role": "solver",
+                        "worker_step": step,
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                )
                 return WorkerResult(
                     status="error",
                     message=f"model decision failed: {type(exc).__name__}: {exc}",
@@ -422,6 +464,7 @@ class WorkerCore:
     async def _next_decision(
         self, task: str, context: dict[str, Any], reports: list[WorkerReport]
     ) -> WorkerDecision:
+        started = time.monotonic()
         response = await self.backend.complete(
             ModelRequest(
                 role="worker",
@@ -440,6 +483,14 @@ class WorkerCore:
                 output_schema=WorkerDecision.model_json_schema(),
             )
         )
+        self._emit(
+            "model.completed",
+            {
+                "role": "solver",
+                "report_count": len(reports),
+                "elapsed_seconds": round(time.monotonic() - started, 6),
+            },
+        )
         try:
             payload = json.loads(response.content)
         except json.JSONDecodeError as exc:
@@ -457,7 +508,7 @@ class WorkerCore:
         changed = previous_hash != content_hash
         self._written_hashes[str(target)] = content_hash
         progress = changed or self._capture_decision_progress(decision)
-        return WorkerReport(
+        report = WorkerReport(
             step=step,
             action="write_file",
             status="ok",
@@ -469,6 +520,7 @@ class WorkerCore:
             redacted=sanitized.redacted,
             sanitizer_findings=_findings_to_dict(sanitized.findings),
         )
+        return report
 
     async def _run_command(self, step: int, decision: WorkerDecision) -> WorkerReport:
         argv = decision.argv
@@ -531,7 +583,7 @@ class WorkerCore:
             json.dumps(metadata, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        return WorkerReport(
+        report = WorkerReport(
             step=step,
             action="run",
             status="timeout" if timed_out else "ok",
@@ -549,20 +601,42 @@ class WorkerCore:
             redacted=stdout.redacted or stderr.redacted,
             sanitizer_findings=_merge_findings(stdout.findings, stderr.findings),
         )
+        self._emit(
+            "worker.command",
+            {
+                "argv": list(argv),
+                "exit_code": exit_code,
+                "timed_out": timed_out,
+                "accepted": exit_code == 0 and not timed_out,
+                "fingerprint": fingerprint,
+            },
+        )
+        return report
 
     async def _http_request(self, step: int, decision: WorkerDecision) -> WorkerReport:
         if self.http_session is None:
             raise WorkerExecutionError("scoped HTTP access is not configured for this lane")
         assert decision.method is not None
         assert decision.url is not None
-        if decision.body is not None and len(decision.body.encode("utf-8")) > 256_000:
-            raise WorkerExecutionError("HTTP request body exceeds 256000 bytes")
+        serialized_body = json.dumps(
+            {
+                "body": decision.body,
+                "json_body": decision.json_body,
+                "form_body": decision.form_body,
+                "multipart": [item.model_dump() for item in decision.multipart],
+            },
+            sort_keys=True,
+            default=str,
+        )
+        if len(serialized_body.encode("utf-8")) > 256_000:
+            raise WorkerExecutionError("HTTP request metadata/body exceeds 256000 bytes")
         fingerprint = command_fingerprint(
             [
                 decision.method,
                 decision.url,
-                decision.body or "",
                 json.dumps(decision.headers, sort_keys=True),
+                json.dumps(decision.query_params, sort_keys=True),
+                serialized_body,
             ]
         )
         if fingerprint in self._seen_commands:
@@ -579,16 +653,37 @@ class WorkerCore:
                 flag_candidates=decision.flag_candidates,
                 made_progress=progress,
             )
-        self._seen_commands.add(fingerprint)
+        request_kwargs: dict[str, Any] = {
+            "headers": decision.headers,
+            "params": decision.query_params,
+        }
+        if decision.body is not None:
+            request_kwargs["content"] = decision.body
+        elif decision.json_body is not None:
+            request_kwargs["json"] = decision.json_body
+        elif decision.form_body:
+            request_kwargs["data"] = decision.form_body
+        elif decision.multipart:
+            request_kwargs["files"] = [
+                (
+                    upload.field_name,
+                    (
+                        upload.filename or Path(upload.path).name,
+                        self._read_upload(upload.path),
+                        upload.content_type,
+                    ),
+                )
+                for upload in decision.multipart
+            ]
         try:
             response = await self.http_session.request(
                 decision.method,
                 decision.url,
-                headers=decision.headers,
-                content=decision.body,
+                **request_kwargs,
             )
         except (httpx.HTTPError, ValueError) as exc:
             raise WorkerExecutionError(f"scoped HTTP request failed: {exc}") from exc
+        self._seen_commands.add(fingerprint)
         body = self.sanitizer.sanitize(
             _truncate(response.content, self.budget.stdout_limit)
         )
@@ -596,11 +691,23 @@ class WorkerCore:
         response_path = self.workspace.artifacts_dir / f"{artifact_prefix}.http.txt"
         metadata_path = self.workspace.artifacts_dir / f"{artifact_prefix}.http.json"
         response_path.write_text(body.text, encoding="utf-8")
-        safe_headers = {
-            name: value
-            for name, value in response.headers.items()
-            if name.lower() not in {"set-cookie", "authorization", "proxy-authenticate"}
-        }
+        safe_headers: dict[str, str] = {}
+        header_bytes = 0
+        for name, value in response.headers.items():
+            if name.lower() in {"set-cookie", "authorization", "proxy-authenticate"}:
+                continue
+            sanitized_value = self.sanitizer.sanitize(value).text
+            item_size = len(name.encode()) + len(sanitized_value.encode())
+            if header_bytes + item_size > self.budget.response_header_limit:
+                break
+            safe_headers[name] = sanitized_value
+            header_bytes += item_size
+        chain_value = response.extensions.get("ctf_redirect_chain", [])
+        redirect_chain = (
+            [dict(item) for item in chain_value if isinstance(item, Mapping)]
+            if isinstance(chain_value, list)
+            else []
+        )
         metadata_path.write_text(
             json.dumps(
                 {
@@ -608,6 +715,7 @@ class WorkerCore:
                     "url": str(response.request.url),
                     "status_code": response.status_code,
                     "headers": safe_headers,
+                    "redirect_chain": redirect_chain,
                     "fingerprint": fingerprint,
                 },
                 indent=2,
@@ -616,7 +724,7 @@ class WorkerCore:
             + "\n",
             encoding="utf-8",
         )
-        return WorkerReport(
+        report = WorkerReport(
             step=step,
             action="http_request",
             status="ok",
@@ -627,12 +735,45 @@ class WorkerCore:
             command_fingerprint=fingerprint,
             response_artifact=str(response_path),
             metadata_artifact=str(metadata_path),
+            redirect_chain=redirect_chain,
             facts=decision.facts,
             flag_candidates=decision.flag_candidates,
             made_progress=True,
             redacted=body.redacted,
             sanitizer_findings=_findings_to_dict(body.findings),
         )
+        self._emit(
+            "worker.http_request",
+            {
+                "method": decision.method,
+                "url": str(response.request.url),
+                "status_code": response.status_code,
+                "accepted": response.status_code < 500,
+                "redirect_count": max(0, len(redirect_chain) - 1),
+                "fingerprint": fingerprint,
+            },
+        )
+        return report
+
+    def _read_upload(self, relative_path: str) -> bytes:
+        path_value = Path(relative_path)
+        if path_value.is_absolute() or ".." in path_value.parts:
+            raise WorkerExecutionError("multipart path must be a safe relative path")
+        if path_value.parts and path_value.parts[0] == "challenge":
+            if self.workspace.challenge_files is None:
+                raise WorkerExecutionError("challenge artifact root is unavailable")
+            root = self.workspace.challenge_files
+            path = (root / Path(*path_value.parts[1:])).resolve()
+        else:
+            root = self.workspace.root
+            path = self.workspace.resolve_relative(relative_path)
+        if root.resolve() not in path.parents or path.is_symlink() or not path.is_file():
+            raise WorkerExecutionError("multipart path is outside approved workspace roots")
+        if path.stat().st_size > self.budget.multipart_file_limit:
+            raise WorkerExecutionError(
+                f"multipart file exceeds {self.budget.multipart_file_limit} bytes"
+            )
+        return path.read_bytes()
 
     def _capture_decision_progress(self, decision: WorkerDecision) -> bool:
         progressed = False
@@ -644,8 +785,23 @@ class WorkerCore:
             key = candidate.value
             if key not in self._seen_candidates:
                 self._seen_candidates.add(key)
+                self._emit(
+                    "flag.candidate",
+                    {
+                        "candidate_sha256": hashlib.sha256(
+                            candidate.value.encode()
+                        ).hexdigest(),
+                        "source_artifact": candidate.source_artifact,
+                        "source_location": candidate.source_location,
+                        "confidence": candidate.confidence,
+                    },
+                )
                 progressed = True
         return progressed
+
+    def _emit(self, event_type: str, payload: Mapping[str, Any]) -> None:
+        if self.event_observer is not None:
+            self.event_observer(event_type, payload)
 
     def _execution_command(self, argv: Sequence[str]) -> list[str]:
         if self.policy.local_test_mode:

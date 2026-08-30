@@ -79,6 +79,7 @@ class ModelSolverSpecialist:
             else self.settings.model_call_budget
         )
         http_session = self._http_session(context)
+        observer = context.get("event_observer")
         worker = WorkerCore(
             self.backend_factory(self.settings, "solver", lane_dir),
             workspace,
@@ -97,6 +98,7 @@ class ModelSolverSpecialist:
             policy=policy,
             shared_model_budget=self.shared_model_budget,
             http_session=http_session,
+            event_observer=observer if callable(observer) else None,
         )
         try:
             result = await worker.run(
