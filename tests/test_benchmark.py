@@ -182,6 +182,8 @@ def test_event_metrics_require_explicit_success_and_completed_resume() -> None:
 
     assert explicit["model_calls"] == 1
     assert explicit["tool_calls"] == 2
+    assert explicit["worker_command_calls"] == 1
+    assert explicit["http_request_calls"] == 1
     assert explicit["candidate_count"] == 1
     assert explicit["rejected_candidates"] == 1
     assert explicit["time_to_candidate_seconds"] == 1.0
@@ -234,6 +236,7 @@ challenges:
     result = benchmark(manifest)
 
     assert result["agent"]["commit"] == "test-commit"
+    assert result["total_elapsed_seconds"] >= 0
     assert result["agent"]["model"] == "fixture-model"
     assert result["challenges"][0]["repeat_runs"] == 2
     assert result["challenges"][0]["execution_group"] == "model-solving"

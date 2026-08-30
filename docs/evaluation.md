@@ -83,6 +83,7 @@ The JSON report includes:
 - Wrong submission count;
 - model call count;
 - tool call count;
+- worker command count and scoped HTTP request count;
 - hallucinated candidate rate;
 - median time to first candidate;
 - median time to verified candidate;
@@ -94,6 +95,7 @@ The JSON report includes:
 - resume verification rate;
 - write-up validation rate;
 - per-challenge repeat records.
+- total benchmark elapsed time.
 
 Official metrics are derived only from scorer-owned command execution and clean replay observations. When `metrics_source: self_reported` is set, optional `benchmark-metrics.json` or `events.jsonl` values are stored separately under `self_reported_metrics`; they do not contribute to aggregate counts or rates. Token and monetary cost are therefore not authoritative benchmark metrics in this release.
 

@@ -68,3 +68,22 @@ def test_doctor_tool_smoke_is_non_root_offline_and_resource_limited(
     script = smoke[-1]
     assert 'test "$(id -u)" != 0' in script
     assert all(f"command -v {tool}" in script for tool in REQUIRED_CONTAINER_TOOLS)
+
+
+def test_ctf_tool_dockerfile_pins_base_and_direct_packages() -> None:
+    dockerfile = (
+        Path(__file__).parents[1] / "docker" / "ctf-tools" / "Dockerfile"
+    ).read_text(encoding="utf-8")
+
+    assert "python:3.12.11-slim-bookworm@sha256:" in dockerfile
+    for package in (
+        "binutils=",
+        "binwalk=",
+        "checksec=",
+        "file=",
+        "foremost=",
+        "libimage-exiftool-perl=",
+        "tini=",
+        "tshark=",
+    ):
+        assert package in dockerfile

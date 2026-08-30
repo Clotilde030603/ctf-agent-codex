@@ -669,6 +669,7 @@ challenges:
 ```
 
 The runner records agent/version/commit/model identity, rejects explicitly unauthorized fixtures, and separates deterministic fixtures from model-solving fixtures. Official aggregate metrics are scorer-owned and derived from explicit events, command execution, and clean replay. Fixture-written metrics remain separate `self_reported_metrics` and never alter official aggregates.
+Worker command calls and scoped HTTP requests are reported separately, together with total elapsed time.
 
 This supersedes older README text that said the runner does **not** perform a separate clean-environment replay; the current runner performs clean replay when `clean_replay` is enabled. Token and monetary cost are not authoritative benchmark metrics in this release.
 

@@ -663,6 +663,7 @@ challenges:
 ```
 
 runner는 agent/version/commit/model identity를 기록하고 명시적으로 허가되지 않은 fixture를 거부하며 deterministic fixture와 model-solving fixture를 분리합니다. 공식 aggregate metric은 명시적 event, command 실행, clean replay에서 계산합니다. Fixture metric은 `self_reported_metrics`로 별도 보존되어 공식 aggregate를 변경하지 않습니다.
+worker command와 scoped HTTP request 수는 total elapsed time과 함께 별도 집계합니다.
 
 이 내용은 별도의 clean-environment replay를 수행하지는 않습니다라고 적힌 예전 README 설명을 대체합니다. 현재 runner는 `clean_replay`가 활성화되어 있으면 clean replay를 수행합니다. token과 금액 기준 cost는 이 release의 authoritative benchmark metric이 아닙니다.
 

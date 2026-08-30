@@ -30,6 +30,8 @@ class BenchmarkMetrics(BaseModel):
     wrong_submissions: int = Field(default=0, ge=0)
     model_calls: int = Field(default=0, ge=0)
     tool_calls: int = Field(default=0, ge=0)
+    worker_command_calls: int = Field(default=0, ge=0)
+    http_request_calls: int = Field(default=0, ge=0)
     hallucinated_candidates: int = Field(default=0, ge=0)
     candidate_count: int = Field(default=0, ge=0)
     rejected_candidates: int = Field(default=0, ge=0)
@@ -157,6 +159,8 @@ class BenchmarkChallengeRecord(BaseModel):
     wrong_submissions: int
     model_calls: int
     tool_calls: int
+    worker_command_calls: int
+    http_request_calls: int
     hallucinated_candidate_rate: float | None
     time_to_candidate_seconds: float | None
     time_to_verified_seconds: float | None
@@ -175,6 +179,7 @@ class BenchmarkReport(BaseModel):
     manifest: str
     challenge_count: int
     run_count: int
+    total_elapsed_seconds: float
     solved_count: int
     solved_run_count: int
     solve_rate: float | None
@@ -189,6 +194,8 @@ class BenchmarkReport(BaseModel):
     wrong_submissions: int
     model_calls: int
     tool_calls: int
+    worker_command_calls: int
+    http_request_calls: int
     hallucinated_candidate_rate: float | None
     results: list[dict[str, Any]]
     challenges: list[BenchmarkChallengeRecord]
@@ -232,6 +239,7 @@ async def run_benchmark(manifest: Path) -> dict[str, Any]:
         manifest=str(manifest),
         challenge_count=len(challenge_records),
         run_count=len(runs),
+        total_elapsed_seconds=round(time.monotonic() - started, 6),
         solved_count=solved_count,
         solved_run_count=solved_run_count,
         solve_rate=_rate([item.solved for item in challenge_records]),
@@ -246,6 +254,10 @@ async def run_benchmark(manifest: Path) -> dict[str, Any]:
         wrong_submissions=sum(item.wrong_submissions for item in challenge_records),
         model_calls=sum(item.model_calls for item in challenge_records),
         tool_calls=sum(item.tool_calls for item in challenge_records),
+        worker_command_calls=sum(
+            item.worker_command_calls for item in challenge_records
+        ),
+        http_request_calls=sum(item.http_request_calls for item in challenge_records),
         hallucinated_candidate_rate=_candidate_hallucination_rate(runs),
         results=[_legacy_result(item) for item in challenge_records],
         challenges=challenge_records,
@@ -299,6 +311,8 @@ async def _run_challenge(
         wrong_submissions=sum(run.metrics.wrong_submissions for run in runs),
         model_calls=sum(run.metrics.model_calls for run in runs),
         tool_calls=sum(run.metrics.tool_calls for run in runs),
+        worker_command_calls=sum(run.metrics.worker_command_calls for run in runs),
+        http_request_calls=sum(run.metrics.http_request_calls for run in runs),
         hallucinated_candidate_rate=_candidate_hallucination_rate(runs),
         time_to_candidate_seconds=_median(
             run.metrics.time_to_candidate_seconds for run in runs
@@ -711,6 +725,8 @@ def _derive_event_metrics(events: Iterable[Mapping[str, Any]]) -> Mapping[str, A
     wrong = 0
     model_calls = 0
     tool_calls = 0
+    worker_command_calls = 0
+    http_request_calls = 0
     hallucinated_candidates = 0
     candidate_count = 0
     rejected_candidates = 0
@@ -745,6 +761,10 @@ def _derive_event_metrics(events: Iterable[Mapping[str, Any]]) -> Mapping[str, A
             "worker.tool_call",
         }:
             tool_calls += 1
+        if event_type == "worker.command":
+            worker_command_calls += 1
+        if event_type == "worker.http_request":
+            http_request_calls += 1
         if event_type in {"flag.candidate", "candidate.found"}:
             candidate_count += 1
             if bool(payload.get("hallucinated")):
@@ -796,6 +816,8 @@ def _derive_event_metrics(events: Iterable[Mapping[str, Any]]) -> Mapping[str, A
         "wrong_submissions": wrong,
         "model_calls": model_calls,
         "tool_calls": tool_calls,
+        "worker_command_calls": worker_command_calls,
+        "http_request_calls": http_request_calls,
         "hallucinated_candidates": hallucinated_candidates,
         "candidate_count": candidate_count,
         "rejected_candidates": rejected_candidates,
@@ -868,6 +890,8 @@ def _group_summaries(
             "wrong_submissions": sum(item.wrong_submissions for item in items),
             "model_calls": sum(item.model_calls for item in items),
             "tool_calls": sum(item.tool_calls for item in items),
+            "worker_command_calls": sum(item.worker_command_calls for item in items),
+            "http_request_calls": sum(item.http_request_calls for item in items),
         }
         for name, items in sorted(groups.items())
     ]
