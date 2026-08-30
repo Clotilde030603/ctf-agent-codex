@@ -562,10 +562,16 @@ class AutonomousWorkflow:
                         challenge.flag_policy.model_dump(mode="json"),
                         backend_factory=self._reviewer_backend_factory,
                     ).derive()
+                    expected_review_source = (
+                        str(blind.provenance.artifact_path.relative_to(context.record.run_dir))
+                        if blind.provenance and blind.provenance.artifact_path
+                        else ""
+                    )
                     matching_findings = [
                         finding
                         for finding in review.findings
                         if finding.candidate == candidate.value
+                        and finding.source_artifact == expected_review_source
                     ]
                     if not review.accepted or not matching_findings:
                         context.ledger.append(

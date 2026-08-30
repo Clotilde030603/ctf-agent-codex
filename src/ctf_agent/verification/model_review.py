@@ -119,7 +119,7 @@ def _valid_finding(finding: ModelReviewFinding, run_dir: Path) -> bool:
     return finding.reproduction_command.strip() in {
         "python solve.py",
         "python3 solve.py",
-    } and bool(finding.source_location.strip())
+    } and bool(finding.source_location.strip()) and bool(finding.evidence)
 
 
 def _copy_regular_tree(source_root: Path, target_root: Path) -> None:
