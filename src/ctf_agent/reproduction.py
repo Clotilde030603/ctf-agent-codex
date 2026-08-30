@@ -71,7 +71,7 @@ async def reproduce_solver(
     if returncode is None:
         raise RuntimeError("solver process ended without an exit code")
     return ReplayResult(
-        returncode == 0 and expected_flag in stdout,
+        returncode == 0 and expected_flag in (stdout + "\n" + stderr),
         stdout,
         stderr,
         returncode,

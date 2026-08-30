@@ -159,6 +159,7 @@ async def test_fake_rctf_full_workflow_reaches_done(tmp_path: Path) -> None:
     workflow = AutonomousWorkflow(
         Settings(
             backend="static",
+            approve_static_submission=True,
             runs_dir=tmp_path / "runs",
             allow_local_reproduction=True,
         ),

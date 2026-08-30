@@ -19,18 +19,28 @@ from ctf_agent.models.factory import create_codex_backend
 ReviewerBackendFactory = Callable[[Settings, str, Path], ModelBackend]
 
 
+class ModelReviewFinding(BaseModel):
+    candidate: str
+    source_artifact: str
+    source_location: str
+    reproduction_command: str
+    evidence: list[str] = Field(default_factory=list)
+
+
 class ModelReviewResponse(BaseModel):
-    derived_candidates: list[str] = Field(default_factory=list)
-    facts: list[str] = Field(default_factory=list)
-    reproduction_command: str = "python3 solve.py"
+    findings: list[ModelReviewFinding] = Field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
 class ModelReviewOutcome:
     accepted: bool
     reason: str
-    derived_candidates: tuple[str, ...] = ()
+    findings: tuple[ModelReviewFinding, ...] = ()
     facts: tuple[str, ...] = ()
+
+    @property
+    def derived_candidates(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(finding.candidate for finding in self.findings))
 
 
 @dataclass(slots=True)
@@ -63,7 +73,9 @@ class ModelBlindReviewer:
                         ),
                         prompt=(
                             "Derive every flag matching the supplied policy from files/ using "
-                            "solve.py. Do not infer an expected value from metadata."
+                            "solve.py. Do not infer an expected value from metadata. For every "
+                            "candidate return its source artifact, source location, reproduction "
+                            "command, and evidence."
                         ),
                         context={
                             "flag_policy": self.flag_policy,
@@ -82,19 +94,32 @@ class ModelBlindReviewer:
             payload = ModelReviewResponse.model_validate(json.loads(response.content))
         except (json.JSONDecodeError, ValueError) as exc:
             return ModelReviewOutcome(False, f"reviewer response invalid: {exc}")
-        candidates = tuple(dict.fromkeys(payload.derived_candidates))
-        if not candidates:
+        findings = tuple(
+            finding
+            for finding in payload.findings
+            if _valid_finding(finding, self.run_dir)
+        )
+        if not findings:
             return ModelReviewOutcome(
                 False,
-                "reviewer independently derived no candidates",
-                facts=tuple(payload.facts),
+                "reviewer independently derived no provenance-backed candidates",
             )
         return ModelReviewOutcome(
             True,
-            "reviewer independently derived candidate set",
-            candidates,
-            tuple(payload.facts),
+            "reviewer independently derived provenance-backed candidate set",
+            findings,
+            tuple(fact for finding in findings for fact in finding.evidence),
         )
+
+
+def _valid_finding(finding: ModelReviewFinding, run_dir: Path) -> bool:
+    artifact = (run_dir / finding.source_artifact).resolve()
+    if run_dir.resolve() not in artifact.parents or not artifact.is_file():
+        return False
+    return finding.reproduction_command.strip() in {
+        "python solve.py",
+        "python3 solve.py",
+    } and bool(finding.source_location.strip())
 
 
 def _copy_regular_tree(source_root: Path, target_root: Path) -> None:

@@ -89,6 +89,23 @@ def test_state_completion_atomically_checkpoints_and_transitions(tmp_path: Path)
     assert store.is_complete("r1", "state:AUTHENTICATE")
 
 
+def test_post_accepted_states_cannot_reopen_solve_or_submit(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.db")
+    store.create(
+        RunRecord(
+            run_id="accepted",
+            challenge_url="https://ctf.test/c/accepted",
+            run_dir=tmp_path,
+            state=RunState.EVIDENCE_PENDING,
+        )
+    )
+
+    with pytest.raises(InvalidTransition):
+        store.transition("accepted", RunState.SOLVE)
+    with pytest.raises(InvalidTransition):
+        store.transition("accepted", RunState.SUBMIT)
+
+
 def test_event_ledger_deduplicates_idempotency_key(tmp_path: Path) -> None:
     ledger = EventLedger(tmp_path / "state.db", tmp_path / "events.jsonl")
     first = ledger.append("r1", "http", {"url": "https://ctf.test"}, idempotency_key="req-1")

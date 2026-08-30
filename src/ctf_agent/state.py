@@ -11,9 +11,9 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from ctf_agent.config import RunSettingsSnapshot
-from ctf_agent.schemas import RunRecord, RunState
+from ctf_agent.schemas import RunRecord, RunState, VerifiedCandidateRecord
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 FORWARD_TRANSITIONS: dict[RunState, set[RunState]] = {
     RunState.AUTHENTICATE: {RunState.INGEST, RunState.FAILED},
@@ -21,20 +21,38 @@ FORWARD_TRANSITIONS: dict[RunState, set[RunState]] = {
     RunState.TRIAGE: {RunState.PLAN, RunState.FAILED},
     RunState.PLAN: {RunState.SOLVE, RunState.FAILED},
     RunState.SOLVE: {RunState.VERIFY, RunState.PLAN, RunState.FAILED},
-    RunState.VERIFY: {RunState.SUBMIT, RunState.SOLVE, RunState.PLAN, RunState.FAILED},
+    RunState.VERIFY: {RunState.REPRODUCE, RunState.SOLVE, RunState.PLAN, RunState.FAILED},
+    RunState.REPRODUCE: {RunState.SUBMIT, RunState.SOLVE, RunState.FAILED},
     RunState.SUBMIT: {
         RunState.AUTHENTICATE,
-        RunState.EVIDENCE,
+        RunState.EVIDENCE_PENDING,
         RunState.READY,
         RunState.PLAN,
         RunState.TRIAGE,
         RunState.FAILED,
     },
-    RunState.EVIDENCE: {RunState.WRITEUP, RunState.REPRODUCE, RunState.FAILED},
-    RunState.WRITEUP: {RunState.REPRODUCE, RunState.SOLVE, RunState.FAILED},
-    RunState.REPRODUCE: {RunState.DONE, RunState.WRITEUP, RunState.SOLVE, RunState.FAILED},
+    RunState.EVIDENCE_PENDING: {
+        RunState.WRITEUP_PENDING,
+        RunState.DONE,
+        RunState.DONE_WITH_WARNINGS,
+        RunState.FAILED,
+    },
+    RunState.WRITEUP_PENDING: {
+        RunState.DONE,
+        RunState.DONE_WITH_WARNINGS,
+        RunState.FAILED,
+    },
+    # Legacy states remain loadable and resume into the new post-Accepted flow.
+    RunState.EVIDENCE: {
+        RunState.WRITEUP_PENDING,
+        RunState.DONE,
+        RunState.DONE_WITH_WARNINGS,
+        RunState.FAILED,
+    },
+    RunState.WRITEUP: {RunState.DONE, RunState.DONE_WITH_WARNINGS, RunState.FAILED},
     RunState.READY: set(),
     RunState.DONE: set(),
+    RunState.DONE_WITH_WARNINGS: set(),
     RunState.FAILED: {RunState.AUTHENTICATE},
 }
 
@@ -125,6 +143,18 @@ class StateStore:
                     created_at TEXT NOT NULL
                 )"""
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS verified_candidates (
+                    run_id TEXT PRIMARY KEY,
+                    candidate_json TEXT NOT NULL,
+                    solver_sha256 TEXT NOT NULL,
+                    source_artifact TEXT NOT NULL,
+                    source_artifact_sha256 TEXT NOT NULL,
+                    verified_at TEXT NOT NULL,
+                    valid INTEGER NOT NULL,
+                    invalidation_reason TEXT
+                )"""
+            )
             connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
     def create(
@@ -176,6 +206,52 @@ class StateStore:
         except (json.JSONDecodeError, ValidationError) as exc:
             raise RuntimeError(f"invalid persisted run settings snapshot: {exc}") from exc
 
+    def save_verified_candidate(self, record: VerifiedCandidateRecord) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO verified_candidates VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    record.run_id,
+                    record.candidate.model_dump_json(),
+                    record.solver_sha256,
+                    record.source_artifact,
+                    record.source_artifact_sha256,
+                    record.verified_at.isoformat(),
+                    record.valid,
+                    record.invalidation_reason,
+                ),
+            )
+
+    def load_verified_candidate(self, run_id: str) -> VerifiedCandidateRecord | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM verified_candidates WHERE run_id=?", (run_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return VerifiedCandidateRecord.model_validate(
+                {
+                    "run_id": row["run_id"],
+                    "candidate": json.loads(str(row["candidate_json"])),
+                    "solver_sha256": row["solver_sha256"],
+                    "source_artifact": row["source_artifact"],
+                    "source_artifact_sha256": row["source_artifact_sha256"],
+                    "verified_at": row["verified_at"],
+                    "valid": bool(row["valid"]),
+                    "invalidation_reason": row["invalidation_reason"],
+                }
+            )
+        except (json.JSONDecodeError, ValidationError) as exc:
+            raise RuntimeError(f"invalid persisted verification record: {exc}") from exc
+
+    def invalidate_verified_candidate(self, run_id: str, reason: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE verified_candidates SET valid=0,invalidation_reason=? WHERE run_id=?",
+                (reason, run_id),
+            )
+
     def load(self, run_id: str) -> RunRecord:
         with self._connect() as connection:
             row = connection.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
@@ -201,6 +277,37 @@ class StateStore:
             connection.execute(
                 "UPDATE runs SET state=?,updated_at=?,last_error=? WHERE run_id=?",
                 (target.value, now, error, run_id),
+            )
+        return self.load(run_id)
+
+    def record_recoverable_error(self, run_id: str, error: str) -> RunRecord:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE runs SET updated_at=?,last_error=? WHERE run_id=?",
+                (datetime.now(UTC).isoformat(), error, run_id),
+            )
+        return self.load(run_id)
+
+    def prepare_evidence_retry(self, run_id: str) -> RunRecord:
+        record = self.load(run_id)
+        if not self.has_accepted_submission(run_id):
+            raise InvalidTransition("evidence retry requires a durable Accepted verdict")
+        allowed = {
+            RunState.EVIDENCE_PENDING,
+            RunState.WRITEUP_PENDING,
+            RunState.DONE_WITH_WARNINGS,
+            RunState.EVIDENCE,
+            RunState.WRITEUP,
+            RunState.FAILED,
+        }
+        if record.state not in allowed:
+            raise InvalidTransition(
+                f"evidence cannot be retried from state {record.state.value}"
+            )
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE runs SET state=?,updated_at=?,last_error=NULL WHERE run_id=?",
+                (RunState.EVIDENCE_PENDING.value, datetime.now(UTC).isoformat(), run_id),
             )
         return self.load(run_id)
 
@@ -352,6 +459,14 @@ class StateStore:
                 (run_id, value),
             ).fetchone()
         return str(row["verdict"]) if row is not None else None
+
+    def has_accepted_submission(self, run_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM submissions WHERE run_id=? AND verdict IN (?,?) LIMIT 1",
+                (run_id, "accepted", "already_solved"),
+            ).fetchone()
+        return row is not None
 
 
 def find_run_database(runs_dir: Path, run_id: str) -> Path:

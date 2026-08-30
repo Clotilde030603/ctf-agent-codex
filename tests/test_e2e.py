@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from ctf_agent.config import Settings
+from ctf_agent.engine import RunContext
 from ctf_agent.evidence import TerminalRenderResult
 from ctf_agent.schemas import (
     Artifact,
@@ -19,8 +20,10 @@ from ctf_agent.schemas import (
     SpecialistResult,
     SubmissionResult,
     SubmissionVerdict,
+    VerifiedCandidateRecord,
 )
 from ctf_agent.workflow import AutonomousWorkflow
+from ctf_agent.writeup.validator import FactValidationResult, WriteupValidator
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk/wcAAusB9Y9Z4ioAAAAASUVORK5CYII="
@@ -126,6 +129,41 @@ class FakeCTFdAdapter:
         return destination
 
 
+class FlakyEvidenceAdapter(FakeCTFdAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_captures = True
+
+    async def capture_challenge(self, challenge: Challenge, destination: Path) -> Path:
+        if self.fail_captures:
+            raise RuntimeError("challenge browser unavailable")
+        return await super().capture_challenge(challenge, destination)
+
+    async def capture_verdict(self, challenge: Challenge, destination: Path) -> Path:
+        if self.fail_captures:
+            raise RuntimeError("verdict browser unavailable")
+        return await super().capture_verdict(challenge, destination)
+
+def persist_verified_candidate(context: RunContext, candidate: FlagCandidate) -> None:
+    source = context.record.run_dir / candidate.source_artifact
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(candidate.value + "\n", encoding="utf-8")
+    solver = context.record.run_dir / "solve.py"
+    solver.write_text(
+        "from pathlib import Path\nprint(Path('files/payload.txt').read_text())\n",
+        encoding="utf-8",
+    )
+    context.store.save_verified_candidate(
+        VerifiedCandidateRecord(
+            run_id=context.record.run_id,
+            candidate=candidate,
+            solver_sha256=hashlib.sha256(solver.read_bytes()).hexdigest(),
+            source_artifact=candidate.source_artifact,
+            source_artifact_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+        )
+    )
+
+
 @pytest.mark.asyncio
 async def test_fake_ctfd_end_to_end_vertical_slice(tmp_path: Path) -> None:
     settings = Settings(
@@ -134,6 +172,7 @@ async def test_fake_ctfd_end_to_end_vertical_slice(tmp_path: Path) -> None:
         tool_timeout_seconds=10,
         submission_budget=2,
         allow_local_reproduction=True,
+        approve_static_submission=True,
     )
     workflow = AutonomousWorkflow(
         settings,
@@ -176,6 +215,7 @@ async def test_pending_submission_is_resolved_without_duplicate_submit(tmp_path:
         tool_timeout_seconds=10,
         submission_budget=2,
         allow_local_reproduction=True,
+        approve_static_submission=True,
     )
     adapter = FakeCTFdAdapter()
     workflow = AutonomousWorkflow(
@@ -204,6 +244,7 @@ async def test_completed_submission_is_not_repeated_after_resume_window(tmp_path
         tool_timeout_seconds=10,
         submission_budget=2,
         allow_local_reproduction=True,
+        approve_static_submission=True,
     )
     adapter = FakeCTFdAdapter()
     workflow = AutonomousWorkflow(
@@ -289,8 +330,9 @@ async def test_verified_dry_run_stops_cleanly_in_ready_state(tmp_path: Path) -> 
     assert candidate["format_match"] is True
     assert candidate["provenance_verified"] is True
     assert candidate["replay_verified"] is True
-    assert candidate["independent_verified"] is True
-    assert candidate["submission_allowed"] is True
+    assert candidate["data_dependency_verified"] is True
+    assert candidate["independent_verified"] is False
+    assert candidate["submission_allowed"] is False
 
 
 @pytest.mark.asyncio
@@ -368,9 +410,11 @@ async def test_auth_required_submission_returns_to_auth_without_budget_cost(
         format_match=True,
         provenance_verified=True,
         replay_verified=True,
+        data_dependency_verified=True,
         independent_verified=True,
         submission_allowed=True,
     )
+    persist_verified_candidate(context, context.values["candidate"])
 
     outcome = await workflow.submit(context)
 
@@ -404,14 +448,165 @@ async def test_evidence_records_terminal_capture_failure_without_fake_png(
         format_match=True,
         provenance_verified=True,
         replay_verified=True,
+        data_dependency_verified=True,
         independent_verified=True,
         submission_allowed=True,
     )
+    persist_verified_candidate(context, context.values["candidate"])
 
-    with pytest.raises(RuntimeError, match="terminal screenshot failed"):
-        await workflow.evidence(context)
+    outcome = await workflow.evidence(context)
 
     evidence_dir = context.record.run_dir / "evidence"
+    assert outcome.target is RunState.WRITEUP_PENDING
     assert not (evidence_dir / "02-exploit-proof.png").exists()
     manifest = json.loads((evidence_dir / "manifest.json").read_text())
     assert any(event["stage"] == "EVIDENCE_FAILURE" for event in manifest["events"])
+
+
+@pytest.mark.asyncio
+async def test_accepted_evidence_failure_is_retryable_without_resubmit(
+    tmp_path: Path,
+) -> None:
+    adapter = FlakyEvidenceAdapter()
+    settings = Settings(
+        backend="static",
+        runs_dir=tmp_path / "runs",
+        allow_local_reproduction=True,
+        approve_static_submission=True,
+    )
+    workflow = AutonomousWorkflow(
+        settings,
+        adapter,
+        terminal_renderer=FakeTerminalRenderer(),
+    )
+    controller = workflow.controller()
+    context = controller.create_run(
+        "https://ctf.test/challenges/retry-evidence",
+        auto_submit=True,
+        writeup=True,
+    )
+
+    first = await controller.execute(context)
+
+    assert first.state is RunState.DONE_WITH_WARNINGS
+    assert len(adapter.submitted) == 1
+    manifest = json.loads((first.run_dir / "evidence" / "manifest.json").read_text())
+    assert manifest["failures"]
+    assert (first.run_dir / "evidence" / "03-verdict-fallback.json").is_file()
+
+    adapter.fail_captures = False
+    retry_context = controller.retry_evidence(first.run_id)
+    retried = await controller.execute(retry_context)
+
+    assert retried.state is RunState.DONE
+    assert len(adapter.submitted) == 1
+    retried_manifest = json.loads(
+        (retried.run_dir / "evidence" / "manifest.json").read_text()
+    )
+    assert retried_manifest["failures"] == []
+
+
+@pytest.mark.asyncio
+async def test_writeup_failure_stays_recoverable_after_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = FakeCTFdAdapter()
+    workflow = AutonomousWorkflow(
+        Settings(
+            backend="static",
+            runs_dir=tmp_path / "runs",
+            allow_local_reproduction=True,
+            approve_static_submission=True,
+        ),
+        adapter,
+        terminal_renderer=FakeTerminalRenderer(),
+    )
+    controller = workflow.controller()
+    context = controller.create_run(
+        "https://ctf.test/challenges/writeup-retry",
+        auto_submit=True,
+        writeup=True,
+    )
+    original = WriteupValidator.validate_all
+    monkeypatch.setattr(
+        WriteupValidator,
+        "validate_all",
+        lambda self, run_dir: FactValidationResult(False, ("forced failure",)),
+    )
+
+    first = await controller.execute(context)
+
+    assert first.state is RunState.WRITEUP_PENDING
+    assert first.last_error == "write-up validation failed: forced failure"
+    assert len(adapter.submitted) == 1
+
+    monkeypatch.setattr(WriteupValidator, "validate_all", original)
+    resumed = controller.resume_run(first.run_id)
+    finished = await controller.execute(resumed)
+
+    assert finished.state is RunState.DONE
+    assert len(adapter.submitted) == 1
+
+
+def test_verified_record_is_invalidated_when_solver_changes(tmp_path: Path) -> None:
+    workflow = AutonomousWorkflow(
+        Settings(backend="static", runs_dir=tmp_path / "runs"),
+        FakeCTFdAdapter(),
+    )
+    context = workflow.controller().create_run(
+        "https://ctf.test/challenges/tamper",
+        auto_submit=False,
+        writeup=False,
+    )
+    candidate = FlagCandidate(
+        value="flag{tamper}",
+        source_artifact="files/payload.txt",
+        source_location="line 1",
+        solver_command="python3 solve.py",
+        format_match=True,
+        provenance_verified=True,
+        replay_verified=True,
+        data_dependency_verified=True,
+    )
+    persist_verified_candidate(context, candidate)
+    (context.record.run_dir / "solve.py").write_text("print('changed')\n")
+
+    with pytest.raises(RuntimeError, match="solver SHA-256 changed"):
+        workflow._candidate(context)
+    record = context.store.load_verified_candidate(context.record.run_id)
+    assert record is not None
+    assert record.valid is False
+
+
+@pytest.mark.asyncio
+async def test_submission_recomputes_gate_from_individual_verification_fields(
+    tmp_path: Path,
+) -> None:
+    workflow = AutonomousWorkflow(
+        Settings(backend="static", runs_dir=tmp_path / "runs"),
+        FakeCTFdAdapter(),
+    )
+    context = workflow.controller().create_run(
+        "https://ctf.test/challenges/gate",
+        auto_submit=True,
+        writeup=False,
+    )
+    context.values["challenge"] = await FakeCTFdAdapter().fetch_challenge(
+        context.record.challenge_url
+    )
+    candidate = FlagCandidate(
+        value="flag{gate}",
+        source_artifact="files/payload.txt",
+        source_location="line 1",
+        solver_command="python3 solve.py",
+        format_match=True,
+        provenance_verified=True,
+        replay_verified=True,
+        data_dependency_verified=False,
+        independent_verified=True,
+        submission_allowed=True,
+    )
+    persist_verified_candidate(context, candidate)
+
+    with pytest.raises(RuntimeError, match="data_dependency_verified"):
+        await workflow.submit(context)

@@ -29,9 +29,15 @@ def test_model_reviewer_derives_without_expected_candidate_in_request(tmp_path: 
     )
     backend = RecordingBackend(
         {
-            "derived_candidates": ["flag{blind_model}"],
-            "facts": ["solve.py reads files/payload.txt"],
-            "reproduction_command": "python3 solve.py",
+            "findings": [
+                {
+                    "candidate": "flag{blind_model}",
+                    "source_artifact": "files/payload.txt",
+                    "source_location": "line 1",
+                    "reproduction_command": "python3 solve.py",
+                    "evidence": ["solve.py reads files/payload.txt"],
+                }
+            ],
         }
     )
 
@@ -62,7 +68,7 @@ def test_model_reviewer_derives_without_expected_candidate_in_request(tmp_path: 
 def test_model_reviewer_reports_empty_derivation(tmp_path: Path) -> None:
     (tmp_path / "files").mkdir()
     (tmp_path / "solve.py").write_text("print('no candidate')\n")
-    backend = RecordingBackend({"derived_candidates": [], "facts": []})
+    backend = RecordingBackend({"findings": []})
 
     outcome = asyncio.run(
         ModelBlindReviewer(
@@ -74,15 +80,22 @@ def test_model_reviewer_reports_empty_derivation(tmp_path: Path) -> None:
     )
 
     assert outcome.accepted is False
-    assert "no candidates" in outcome.reason
+    assert "no provenance-backed candidates" in outcome.reason
 
 
 def test_codex_workflow_requires_reviewer_model_match(tmp_path: Path) -> None:
     (tmp_path / "unused").mkdir()
     backend = RecordingBackend(
         {
-            "derived_candidates": ["flag{reviewed}"],
-            "facts": ["solver output derived from files/payload.txt"],
+            "findings": [
+                {
+                    "candidate": "flag{reviewed}",
+                    "source_artifact": "files/payload.txt",
+                    "source_location": "line 1",
+                    "reproduction_command": "python3 solve.py",
+                    "evidence": ["solver output derived from files/payload.txt"],
+                }
+            ],
         }
     )
     workflow = AutonomousWorkflow(
@@ -121,7 +134,7 @@ def test_codex_workflow_requires_reviewer_model_match(tmp_path: Path) -> None:
 
     outcome = asyncio.run(workflow.verify(context))
 
-    assert outcome.target is RunState.SUBMIT
+    assert outcome.target is RunState.REPRODUCE
     verified = context.values["candidate"]
     assert isinstance(verified, FlagCandidate)
     assert verified.independent_verified is True

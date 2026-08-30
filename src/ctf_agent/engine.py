@@ -42,9 +42,16 @@ StateHandler = Callable[[RunContext], Awaitable[StateOutcome]]
 
 
 class Controller:
-    def __init__(self, settings: Settings, handlers: dict[RunState, StateHandler]) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        handlers: dict[RunState, StateHandler],
+        *,
+        resume_overrides: dict[str, Any] | None = None,
+    ) -> None:
         self.settings = settings
         self.handlers = handlers
+        self.resume_overrides = dict(resume_overrides or {})
 
     @staticmethod
     def _run_id(url: str) -> str:
@@ -99,7 +106,6 @@ class Controller:
                 record = store.load(run_id)
             except KeyError:
                 continue
-            ledger = EventLedger(database, record.run_dir / "events.jsonl")
             snapshot = store.load_settings_snapshot(run_id)
             if snapshot is None:
                 settings_payload: dict[str, Any] = {
@@ -107,23 +113,25 @@ class Controller:
                     "migration": "safe current defaults",
                 }
             else:
-                restored = snapshot.restore(runs_dir=self.settings.runs_dir)
-                active_values = self.settings.model_dump(mode="json")
+                restored = snapshot.restore(
+                    runs_dir=self.settings.runs_dir,
+                    overrides=self.resume_overrides,
+                )
+                for key, value in restored.model_dump().items():
+                    setattr(self.settings, key, value)
+                active_values = restored.model_dump(mode="json")
+                stored_values = snapshot.restore(
+                    runs_dir=self.settings.runs_dir
+                ).model_dump(mode="json")
                 changed = {
                     key: {"stored": stored, "active": active_values.get(key)}
-                    for key, stored in restored.model_dump(mode="json").items()
+                    for key, stored in stored_values.items()
                     if key != "runs_dir" and active_values.get(key) != stored
                 }
                 settings_payload = {
                     "snapshot_schema_version": snapshot.schema_version,
                     "overrides": changed,
                 }
-            ledger.append(
-                run_id,
-                "run.resumed",
-                {"checkpoint": record.state.value, "settings": settings_payload},
-                state=record.state.value,
-            )
             if challenge_url is None and "REDACTED" in record.challenge_url:
                 raise RuntimeError(
                     "this run used a credential-bearing challenge URL; pass the original "
@@ -132,6 +140,13 @@ class Controller:
             runtime_url = challenge_url or record.challenge_url
             if redact_url(runtime_url) != record.challenge_url:
                 raise ValueError("resume challenge URL does not match the stored run")
+            ledger = EventLedger(database, record.run_dir / "events.jsonl")
+            ledger.append(
+                run_id,
+                "run.resumed",
+                {"checkpoint": record.state.value, "settings": settings_payload},
+                state=record.state.value,
+            )
             return RunContext(
                 record,
                 store,
@@ -141,12 +156,26 @@ class Controller:
             )
         raise KeyError(f"run not found: {run_id}")
 
+    def retry_evidence(
+        self, run_id: str, *, challenge_url: str | None = None
+    ) -> RunContext:
+        context = self.resume_run(run_id, challenge_url=challenge_url)
+        context.record = context.store.prepare_evidence_retry(run_id)
+        context.ledger.append(
+            run_id,
+            "evidence.retry_requested",
+            {"accepted_verdict_preserved": True},
+            state=RunState.EVIDENCE_PENDING.value,
+        )
+        return context
+
     async def execute(self, context: RunContext) -> RunRecord:
         steps = 0
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.total_run_timeout_seconds
         while context.record.state not in {
             RunState.DONE,
+            RunState.DONE_WITH_WARNINGS,
             RunState.READY,
             RunState.FAILED,
         }:
@@ -218,9 +247,19 @@ class Controller:
                     {"error_type": type(exc).__name__, "message": str(exc)},
                     state=state.value,
                 )
-                context.record = context.store.transition(
-                    context.record.run_id, RunState.FAILED, str(exc)
-                )
+                if state in {
+                    RunState.EVIDENCE_PENDING,
+                    RunState.WRITEUP_PENDING,
+                    RunState.EVIDENCE,
+                    RunState.WRITEUP,
+                } and context.store.has_accepted_submission(context.record.run_id):
+                    context.record = context.store.record_recoverable_error(
+                        context.record.run_id, str(exc)
+                    )
+                else:
+                    context.record = context.store.transition(
+                        context.record.run_id, RunState.FAILED, str(exc)
+                    )
                 return context.record
             context.record = context.store.complete_state(
                 context.record.run_id,

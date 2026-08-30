@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     browser_storage_state: Path | None = None
     allow_private_hosts: bool = False
     allow_local_reproduction: bool = False
+    approve_static_submission: bool = False
     redact_flag: bool = False
     docker_image: str = "python:3.12-slim"
 
@@ -85,6 +86,7 @@ class RunSettingsSnapshot(BaseModel):
     browser_storage_state: str | None
     allow_private_hosts: bool
     allow_local_reproduction: bool
+    approve_static_submission: bool = False
     redact_flag: bool
     docker_image: str
 

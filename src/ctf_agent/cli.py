@@ -59,6 +59,13 @@ def solve(
         bool, typer.Option("--allow-local-reproduction")
     ] = False,
     redact_flag: Annotated[bool, typer.Option("--redact-flag")] = False,
+    approve_static_submit: Annotated[
+        bool,
+        typer.Option(
+            "--approve-static-submit",
+            help="Explicitly permit static-backend submission without model consensus",
+        ),
+    ] = False,
 ) -> None:
     """Create and execute a new challenge run."""
     if auto_submit and dry_run:
@@ -83,6 +90,7 @@ def solve(
             "allow_private_hosts": allow_private_host,
             "allow_local_reproduction": allow_local_reproduction,
             "redact_flag": redact_flag,
+            "approve_static_submission": approve_static_submit,
         }
     )
     workflow = AutonomousWorkflow(settings)
@@ -137,6 +145,10 @@ def resume(
         typer.Option("--redact-flag/--show-flag"),
     ] = None,
     docker_image: Annotated[str | None, typer.Option("--docker-image")] = None,
+    approve_static_submit: Annotated[
+        bool | None,
+        typer.Option("--approve-static-submit/--revoke-static-submit-approval"),
+    ] = None,
 ) -> None:
     """Continue from the last durable state checkpoint."""
     overrides: dict[str, object] = {
@@ -153,6 +165,7 @@ def resume(
             "allow_local_reproduction": allow_local_reproduction,
             "redact_flag": redact_flag,
             "docker_image": docker_image,
+            "approve_static_submission": approve_static_submit,
         }.items()
         if value is not None
     }
@@ -181,6 +194,32 @@ def resume(
         raise typer.BadParameter(str(exc)) from exc
     controller = workflow.controller()
     context = controller.resume_run(run_id, challenge_url=challenge_url)
+    result = asyncio.run(controller.execute(context))
+    typer.echo(
+        json.dumps(
+            {"run_id": result.run_id, "state": result.state, "run_dir": str(result.run_dir)}
+        )
+    )
+    if result.last_error:
+        raise typer.Exit(1)
+
+
+@app.command("retry-evidence")
+def retry_evidence(
+    run_id: Annotated[str, typer.Argument(help="Accepted run identifier")],
+    runs_dir: Annotated[Path, typer.Option("--runs-dir")] = Path("runs"),
+    challenge_url: Annotated[
+        str | None,
+        typer.Option(
+            "--challenge-url",
+            help="Re-supply a credential-bearing URL without persisting its secret query",
+        ),
+    ] = None,
+) -> None:
+    """Retry missing evidence for a durably Accepted run without resubmitting."""
+    workflow = AutonomousWorkflow.from_run(runs_dir, run_id)
+    controller = workflow.controller()
+    context = controller.retry_evidence(run_id, challenge_url=challenge_url)
     result = asyncio.run(controller.execute(context))
     typer.echo(
         json.dumps(

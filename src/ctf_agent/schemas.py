@@ -22,11 +22,14 @@ class RunState(StrEnum):
     SOLVE = "SOLVE"
     VERIFY = "VERIFY"
     SUBMIT = "SUBMIT"
+    EVIDENCE_PENDING = "EVIDENCE_PENDING"
+    WRITEUP_PENDING = "WRITEUP_PENDING"
     EVIDENCE = "EVIDENCE"
     WRITEUP = "WRITEUP"
     REPRODUCE = "REPRODUCE"
     READY = "READY"
     DONE = "DONE"
+    DONE_WITH_WARNINGS = "DONE_WITH_WARNINGS"
     FAILED = "FAILED"
 
 
@@ -98,6 +101,7 @@ class FlagCandidate(BaseModel):
     format_match: bool = False
     provenance_verified: bool = False
     replay_verified: bool = False
+    data_dependency_verified: bool = False
     independent_verified: bool = False
     submission_allowed: bool = False
     confidence: float = Field(default=0, ge=0, le=1)
@@ -142,6 +146,17 @@ class VerificationResult(BaseModel):
     approved: bool
     reasons: list[str] = Field(default_factory=list)
     candidate: FlagCandidate
+
+
+class VerifiedCandidateRecord(BaseModel):
+    run_id: str
+    candidate: FlagCandidate
+    solver_sha256: str
+    source_artifact: str
+    source_artifact_sha256: str
+    verified_at: datetime = Field(default_factory=utc_now)
+    valid: bool = True
+    invalidation_reason: str | None = None
 
 
 class EvidenceItem(BaseModel):

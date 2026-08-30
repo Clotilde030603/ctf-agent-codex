@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import shutil
 from pathlib import Path
@@ -11,7 +12,7 @@ from urllib.parse import urlsplit
 
 from ctf_agent.config import Settings
 from ctf_agent.engine import Controller, RunContext, StateHandler, StateOutcome
-from ctf_agent.evidence import EvidenceManifest, TerminalRenderer
+from ctf_agent.evidence import EvidenceManifest, SecretSanitizer, TerminalRenderer
 from ctf_agent.ingestion.session import ScopedAsyncSession, SessionConfig
 from ctf_agent.models.base import ModelBackend, ModelBackendError
 from ctf_agent.models.factory import create_codex_backend
@@ -26,6 +27,7 @@ from ctf_agent.schemas import (
     RunState,
     SpecialistResult,
     SubmissionVerdict,
+    VerifiedCandidateRecord,
 )
 from ctf_agent.scope import HostScope
 from ctf_agent.security import redact_persisted_value
@@ -58,6 +60,14 @@ def _write_json(path: Path, value: object) -> None:
     )
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 class AutonomousWorkflow:
     def __init__(
         self,
@@ -79,6 +89,7 @@ class AutonomousWorkflow:
         self._worker_local_test_mode = worker_local_test_mode
         self._worker_allowed_argv0 = worker_allowed_argv0
         self._terminal_renderer = terminal_renderer or TerminalRenderer()
+        self._resume_overrides: dict[str, Any] = {}
         self.handlers: dict[RunState, StateHandler] = {
             RunState.AUTHENTICATE: self.authenticate,
             RunState.INGEST: self.ingest,
@@ -87,6 +98,8 @@ class AutonomousWorkflow:
             RunState.SOLVE: self.solve,
             RunState.VERIFY: self.verify,
             RunState.SUBMIT: self.submit,
+            RunState.EVIDENCE_PENDING: self.evidence,
+            RunState.WRITEUP_PENDING: self.writeup,
             RunState.EVIDENCE: self.evidence,
             RunState.WRITEUP: self.writeup,
             RunState.REPRODUCE: self.reproduce,
@@ -107,10 +120,16 @@ class AutonomousWorkflow:
             if snapshot is not None
             else Settings.model_validate({"runs_dir": runs_dir, **(overrides or {})})
         )
-        return cls(settings)
+        workflow = cls(settings)
+        workflow._resume_overrides = dict(overrides or {})
+        return workflow
 
     def controller(self) -> Controller:
-        return Controller(self.settings, self.handlers)
+        return Controller(
+            self.settings,
+            self.handlers,
+            resume_overrides=self._resume_overrides,
+        )
 
     async def _adapter(self, context: RunContext) -> PlatformAdapter:
         if self._adapter_override is not None:
@@ -446,6 +465,17 @@ class AutonomousWorkflow:
         reasons: list[str] = []
         for result in results:
             for candidate in result.flag_candidates:
+                context.ledger.append(
+                    context.record.run_id,
+                    "flag.candidate",
+                    {
+                        "hypothesis_id": result.hypothesis_id,
+                        "source_artifact": candidate.source_artifact,
+                        "source_location": candidate.source_location,
+                        "confidence": candidate.confidence,
+                    },
+                    state=RunState.VERIFY.value,
+                )
                 if context.store.is_rejected(context.record.run_id, candidate.value):
                     rejected.add(candidate.value)
                 verifier = ReplayVerifier(
@@ -455,6 +485,19 @@ class AutonomousWorkflow:
                     timeout_seconds=self.settings.tool_timeout_seconds,
                 )
                 outcome = verifier.verify(candidate)
+                replay_result = outcome.replay
+                context.ledger.append(
+                    context.record.run_id,
+                    "solver.replayed",
+                    {
+                        "accepted": outcome.accepted,
+                        "returncode": replay_result.returncode if replay_result else None,
+                        "matched_candidate": bool(
+                            replay_result and replay_result.matched_flag is not None
+                        ),
+                    },
+                    state=RunState.VERIFY.value,
+                )
                 if not outcome.accepted:
                     reasons.append(f"{candidate.value}: replay: {outcome.reason}")
                     continue
@@ -469,7 +512,8 @@ class AutonomousWorkflow:
                         f"{candidate.value}: {blind.failure_stage}: {blind.reason}"
                     )
                     continue
-                reviewer_reason = "separate blind process reproduced candidate"
+                reviewer_reason = "no independent reviewer"
+                independent_verified = False
                 if self.settings.backend == "codex":
                     model_request_count = sum(
                         event["event_type"] == "model.request"
@@ -496,7 +540,12 @@ class AutonomousWorkflow:
                         challenge.flag_policy.model_dump(mode="json"),
                         backend_factory=self._reviewer_backend_factory,
                     ).derive()
-                    if not review.accepted or candidate.value not in review.derived_candidates:
+                    matching_findings = [
+                        finding
+                        for finding in review.findings
+                        if finding.candidate == candidate.value
+                    ]
+                    if not review.accepted or not matching_findings:
                         context.ledger.append(
                             context.record.run_id,
                             "model.failure",
@@ -514,6 +563,7 @@ class AutonomousWorkflow:
                         )
                         continue
                     reviewer_reason = review.reason
+                    independent_verified = True
                     context.ledger.append(
                         context.record.run_id,
                         "model.completed",
@@ -524,17 +574,55 @@ class AutonomousWorkflow:
                         },
                         state=RunState.VERIFY.value,
                     )
+                context.ledger.append(
+                    context.record.run_id,
+                    "independent.verified",
+                    {
+                        "accepted": independent_verified,
+                        "backend": self.settings.backend,
+                        "reason": reviewer_reason,
+                    },
+                    state=RunState.VERIFY.value,
+                )
+                data_dependency_verified = bool(
+                    blind.negative_control
+                    and blind.negative_control.matched_flag != candidate.value
+                )
+                provenance_verified = bool(
+                    blind.provenance and blind.provenance.accepted
+                )
+                submission_allowed = all(
+                    (
+                        provenance_verified,
+                        data_dependency_verified,
+                        independent_verified
+                        or (
+                            self.settings.backend == "static"
+                            and self.settings.approve_static_submission
+                        ),
+                    )
+                )
                 verified = candidate.model_copy(
                     update={
                         "format_match": True,
-                        "provenance_verified": bool(
-                            blind.provenance and blind.provenance.accepted
-                        ),
+                        "provenance_verified": provenance_verified,
                         "replay_verified": True,
-                        "independent_verified": True,
-                        "submission_allowed": True,
+                        "data_dependency_verified": data_dependency_verified,
+                        "independent_verified": independent_verified,
+                        "submission_allowed": submission_allowed,
                     }
                 )
+                assert blind.provenance is not None
+                assert blind.provenance.artifact_path is not None
+                source_artifact = blind.provenance.artifact_path
+                verification_record = VerifiedCandidateRecord(
+                    run_id=context.record.run_id,
+                    candidate=verified,
+                    solver_sha256=_sha256_file(context.record.run_dir / "solve.py"),
+                    source_artifact=str(source_artifact.relative_to(context.record.run_dir)),
+                    source_artifact_sha256=_sha256_file(source_artifact),
+                )
+                context.store.save_verified_candidate(verification_record)
                 context.values["candidate"] = verified
                 context.values["replay"] = outcome.replay
                 context.ledger.append(
@@ -547,13 +635,14 @@ class AutonomousWorkflow:
                         "format_match": verified.format_match,
                         "provenance_verified": verified.provenance_verified,
                         "replay_verified": verified.replay_verified,
+                        "data_dependency_verified": verified.data_dependency_verified,
                         "independent_verified": verified.independent_verified,
                         "submission_allowed": verified.submission_allowed,
                     },
                     state=RunState.VERIFY.value,
                 )
                 return StateOutcome(
-                    RunState.SUBMIT,
+                    RunState.REPRODUCE,
                     {"accepted": True, "flag": verified.value},
                 )
         context.ledger.append(
@@ -569,19 +658,32 @@ class AutonomousWorkflow:
 
     async def submit(self, context: RunContext) -> StateOutcome:
         candidate = self._candidate(context)
+        independently_approved = candidate.independent_verified or (
+            self.settings.backend == "static"
+            and self.settings.approve_static_submission
+        )
+        submission_allowed = all(
+            (
+                candidate.format_match,
+                candidate.provenance_verified,
+                candidate.replay_verified,
+                candidate.data_dependency_verified,
+                independently_approved,
+            )
+        )
+        candidate = candidate.model_copy(
+            update={"submission_allowed": submission_allowed}
+        )
+        context.values["candidate"] = candidate
         required_checks = {
             "format_match": candidate.format_match,
             "provenance_verified": candidate.provenance_verified,
             "replay_verified": candidate.replay_verified,
-            "independent_verified": candidate.independent_verified,
+            "data_dependency_verified": candidate.data_dependency_verified,
+            "independent_or_manually_approved": independently_approved,
             "submission_allowed": candidate.submission_allowed,
         }
         failed_checks = [name for name, passed in required_checks.items() if not passed]
-        if failed_checks:
-            raise RuntimeError(
-                "submission blocked by incomplete verification: "
-                + ", ".join(failed_checks)
-            )
         if not context.record.auto_submit:
             output = context.record.run_dir / "verified-candidate.json"
             _write_json(
@@ -607,7 +709,13 @@ class AutonomousWorkflow:
                     "verified": True,
                     "submitted": False,
                     "candidate_path": str(output),
+                    "submission_blockers": failed_checks,
                 },
+            )
+        if failed_checks:
+            raise RuntimeError(
+                "submission blocked by incomplete verification: "
+                + ", ".join(failed_checks)
             )
         previous_verdict = context.store.latest_submission_verdict(
             context.record.run_id, candidate.value
@@ -617,7 +725,7 @@ class AutonomousWorkflow:
             SubmissionVerdict.ALREADY_SOLVED.value,
         }:
             return StateOutcome(
-                RunState.EVIDENCE,
+                RunState.EVIDENCE_PENDING,
                 {"accepted": True, "flag": candidate.value, "resumed": True},
             )
         if previous_verdict == SubmissionVerdict.WRONG.value:
@@ -710,7 +818,8 @@ class AutonomousWorkflow:
         )
         if result.verdict in {SubmissionVerdict.ACCEPTED, SubmissionVerdict.ALREADY_SOLVED}:
             return StateOutcome(
-                RunState.EVIDENCE, {"accepted": True, "flag": candidate.value}
+                RunState.EVIDENCE_PENDING,
+                {"accepted": True, "flag": candidate.value},
             )
         if result.verdict is SubmissionVerdict.WRONG:
             context.store.reject_candidate(context.record.run_id, candidate.value, result.message)
@@ -724,76 +833,85 @@ class AutonomousWorkflow:
     async def evidence(self, context: RunContext) -> StateOutcome:
         run_dir = context.record.run_dir
         evidence_dir = run_dir / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
         challenge = self._challenge(context)
-        adapter = await self._adapter(context)
         manifest = EvidenceManifest(context.record.run_id)
-        failures: list[str] = []
+        failures: dict[str, str] = {}
         try:
-            challenge_image = await adapter.capture_challenge(
-                challenge, evidence_dir / "01-challenge.png"
-            )
+            adapter = await self._adapter(context)
         except Exception as exc:
-            challenge_image = None
-            failures.append(f"challenge screenshot failed: {type(exc).__name__}: {exc}")
+            adapter = None
+            failures["platform-session"] = f"{type(exc).__name__}: {exc}"
+
+        challenge_image = evidence_dir / "01-challenge.png"
+        if not challenge_image.is_file() and adapter is not None:
+            try:
+                captured = await adapter.capture_challenge(challenge, challenge_image)
+                if captured is not None:
+                    challenge_image = captured
+            except Exception as exc:
+                failures["challenge-screenshot"] = f"{type(exc).__name__}: {exc}"
+        if not challenge_image.is_file():
+            failures.setdefault("challenge-screenshot", "screenshot was not created")
+
         replay = context.values.get("replay")
         transcript = getattr(replay, "stdout", "") or self._candidate(context).value
-        try:
-            terminal = self._terminal_renderer.render(
-                transcript,
-                evidence_dir,
-                stem="02-exploit-proof",
-                command="python3 solve.py",
-            )
-        except Exception as exc:
-            terminal = None
-            failures.append(f"terminal render failed: {type(exc).__name__}: {exc}")
-        proof_image = terminal.png_path if terminal is not None else None
-        if terminal is not None and terminal.html_path.is_file():
+        terminal_html = evidence_dir / "02-exploit-proof.html"
+        proof_image = evidence_dir / "02-exploit-proof.png"
+        terminal = None
+        if not terminal_html.is_file() or not proof_image.is_file():
+            try:
+                terminal = self._terminal_renderer.render(
+                    transcript,
+                    evidence_dir,
+                    stem="02-exploit-proof",
+                    command="python3 solve.py",
+                )
+                terminal_html = terminal.html_path
+                if terminal.png_path is not None:
+                    proof_image = terminal.png_path
+            except Exception as exc:
+                failures["terminal-render"] = f"{type(exc).__name__}: {exc}"
+        if terminal_html.is_file():
             manifest.add_file(
-                terminal.html_path,
+                terminal_html,
                 root=run_dir,
                 label="exploit-proof-transcript",
                 media_type="text/html",
                 source="solver-replay",
-                redacted=terminal.redacted,
-                metadata={"screenshot_status": terminal.screenshot_status},
+                redacted=bool(terminal and terminal.redacted),
+                metadata={
+                    "screenshot_status": (
+                        terminal.screenshot_status if terminal else "preserved"
+                    )
+                },
                 producer="ctf_agent.evidence.TerminalRenderer",
                 command="python3 solve.py",
                 exit_code=getattr(replay, "returncode", None),
                 model=self.settings.solver_model,
                 tool="python",
             )
-        if proof_image is None:
-            status = terminal.screenshot_status if terminal is not None else "render-error"
-            failures.append(f"terminal screenshot failed: {status}")
-        try:
-            verdict_image = await adapter.capture_verdict(
-                challenge, evidence_dir / "03-accepted.png"
-            )
-        except Exception as exc:
-            verdict_image = None
-            failures.append(f"verdict screenshot failed: {type(exc).__name__}: {exc}")
-        if challenge_image is None or not challenge_image.is_file():
-            failures.append("challenge screenshot was not created")
-        if verdict_image is None or not verdict_image.is_file():
-            failures.append("verdict screenshot was not created")
-        if failures:
-            for failure in dict.fromkeys(failures):
-                manifest.add_event("EVIDENCE_FAILURE", failure, accepted=False)
-                manifest.add_capture_failure(
-                    "required-evidence",
-                    stage="EVIDENCE",
-                    reason=failure,
-                    producer="ctf_agent.workflow.AutonomousWorkflow",
-                )
-            manifest.save(evidence_dir / "manifest.json")
-            raise RuntimeError(
-                "required evidence capture failed: " + "; ".join(dict.fromkeys(failures))
-            )
-        required = (challenge_image, proof_image, verdict_image)
-        labels = ("challenge", "exploit-proof", "accepted")
-        for label, path in zip(labels, required, strict=True):
-            assert path is not None
+        if not proof_image.is_file():
+            failures.setdefault("terminal-screenshot", "screenshot was not created")
+
+        verdict_image = evidence_dir / "03-accepted.png"
+        if not verdict_image.is_file() and adapter is not None:
+            try:
+                captured = await adapter.capture_verdict(challenge, verdict_image)
+                if captured is not None:
+                    verdict_image = captured
+            except Exception as exc:
+                failures["verdict-screenshot"] = f"{type(exc).__name__}: {exc}"
+        if not verdict_image.is_file():
+            failures.setdefault("verdict-screenshot", "screenshot was not created")
+
+        for label, path in (
+            ("challenge", challenge_image),
+            ("exploit-proof", proof_image),
+            ("accepted", verdict_image),
+        ):
+            if not path.is_file():
+                continue
             manifest.add_file(
                 path,
                 root=run_dir,
@@ -815,12 +933,87 @@ class AutonomousWorkflow:
                 model=self.settings.solver_model if label == "exploit-proof" else None,
                 tool="python" if label == "exploit-proof" else "playwright",
             )
+
+        sanitizer = SecretSanitizer()
+        if not challenge_image.is_file():
+            fallback = evidence_dir / "01-challenge-fallback.html"
+            sanitized = sanitizer.sanitize(
+                json.dumps(challenge.model_dump(mode="json"), indent=2, default=str)
+            )
+            fallback.write_text(
+                "<html><body><pre>" + html.escape(sanitized.text) + "</pre></body></html>",
+                encoding="utf-8",
+            )
+            manifest.add_file(
+                fallback,
+                root=run_dir,
+                label="challenge-fallback",
+                media_type="text/html",
+                source="sanitized-challenge-record",
+                redacted=sanitized.redacted,
+                producer="ctf_agent.workflow.AutonomousWorkflow",
+            )
+        if not verdict_image.is_file():
+            fallback = evidence_dir / "03-verdict-fallback.json"
+            verdict = context.store.latest_submission_verdict(
+                context.record.run_id, self._candidate(context).value
+            )
+            sanitized = sanitizer.sanitize(
+                json.dumps(
+                    {"challenge_id": challenge.id, "verdict": verdict},
+                    indent=2,
+                )
+            )
+            fallback.write_text(sanitized.text + "\n", encoding="utf-8")
+            manifest.add_file(
+                fallback,
+                root=run_dir,
+                label="accepted-verdict-fallback",
+                media_type="application/json",
+                source="durable-submission-record",
+                redacted=sanitized.redacted,
+                producer="ctf_agent.workflow.AutonomousWorkflow",
+            )
+
+        for label, reason in failures.items():
+            manifest.add_event("EVIDENCE_FAILURE", reason, accepted=False, label=label)
+            manifest.add_capture_failure(
+                label,
+                stage="EVIDENCE",
+                reason=reason,
+                producer="ctf_agent.workflow.AutonomousWorkflow",
+            )
+            context.ledger.append(
+                context.record.run_id,
+                "evidence.failed",
+                {"label": label, "reason": reason},
+                state=context.record.state.value,
+            )
         flag = self._candidate(context).value
         manifest.add_event("VERIFY", "candidate independently replayed", flag=flag)
         manifest.add_event("SUBMIT", "platform accepted candidate", flag=flag, accepted=True)
         manifest.save(evidence_dir / "manifest.json")
-        target = RunState.WRITEUP if context.record.writeup else RunState.REPRODUCE
-        return StateOutcome(target, {"evidence_files": 4})
+        context.ledger.append(
+            context.record.run_id,
+            "evidence.captured",
+            {
+                "accepted": not failures,
+                "entry_count": len(manifest.entries),
+                "failure_count": len(manifest.failures),
+            },
+            state=context.record.state.value,
+        )
+        if context.record.writeup:
+            target = RunState.WRITEUP_PENDING
+        else:
+            target = RunState.DONE_WITH_WARNINGS if failures else RunState.DONE
+        return StateOutcome(
+            target,
+            {
+                "evidence_files": len(manifest.entries),
+                "warnings": len(failures),
+            },
+        )
 
     async def writeup(self, context: RunContext) -> StateOutcome:
         generator = WriteupGenerator()
@@ -830,9 +1023,27 @@ class AutonomousWorkflow:
         )
         validation = WriteupValidator().validate_all(context.record.run_dir)
         if not validation.ok:
+            context.ledger.append(
+                context.record.run_id,
+                "writeup.validated",
+                {"accepted": False, "errors": validation.errors},
+                state=context.record.state.value,
+            )
             raise RuntimeError("write-up validation failed: " + "; ".join(validation.errors))
+        context.ledger.append(
+            context.record.run_id,
+            "writeup.validated",
+            {"accepted": True},
+            state=context.record.state.value,
+        )
+        manifest_path = context.record.run_dir / "evidence" / "manifest.json"
+        warnings = (
+            len(EvidenceManifest.load(manifest_path).failures)
+            if manifest_path.is_file()
+            else 1
+        )
         return StateOutcome(
-            RunState.REPRODUCE,
+            RunState.DONE_WITH_WARNINGS if warnings else RunState.DONE,
             {
                 "writeup_markdown": str(outputs.markdown_path),
                 "writeup_html": str(outputs.html_path),
@@ -861,8 +1072,13 @@ class AutonomousWorkflow:
             state=RunState.REPRODUCE.value,
         )
         if not result.success:
+            if result.command and result.command[0] == "docker":
+                raise RuntimeError(
+                    "clean Docker reproduction failed before submission: "
+                    + (result.stderr or f"exit code {result.exit_code}")
+                )
             return StateOutcome(RunState.SOLVE, {"reproduced": False})
-        return StateOutcome(RunState.DONE, {"reproduced": True})
+        return StateOutcome(RunState.SUBMIT, {"reproduced": True})
 
     def _challenge(self, context: RunContext) -> Challenge:
         value = context.values.get("challenge")
@@ -884,28 +1100,78 @@ class AutonomousWorkflow:
         return results
 
     def _candidate(self, context: RunContext) -> FlagCandidate:
-        value = context.values.get("candidate")
-        if isinstance(value, FlagCandidate):
-            return value
+        record = context.store.load_verified_candidate(context.record.run_id)
+        if record is not None:
+            if not record.valid:
+                raise RuntimeError(
+                    "verified candidate was invalidated: "
+                    + (record.invalidation_reason or "unknown reason")
+                )
+            solver = context.record.run_dir / "solve.py"
+            source = context.record.run_dir / record.source_artifact
+            mismatch = None
+            if not solver.is_file() or _sha256_file(solver) != record.solver_sha256:
+                mismatch = "solver SHA-256 changed after verification"
+            elif (
+                not source.is_file()
+                or _sha256_file(source) != record.source_artifact_sha256
+            ):
+                mismatch = "provenance artifact SHA-256 changed after verification"
+            if mismatch is not None:
+                context.store.invalidate_verified_candidate(
+                    context.record.run_id, mismatch
+                )
+                raise RuntimeError(mismatch)
+            context.values["candidate"] = record.candidate
+            return record.candidate
+
+        # Backward-compatible migration for pre-verification-table runs. Only
+        # explicit booleans in the historical event are restored; missing values
+        # remain False and are never promoted to success.
         verified_events = [
             item for item in context.ledger.list(context.record.run_id)
             if item["event_type"] == "flag.verified" and item["payload"].get("flag")
         ]
         if not verified_events:
             raise RuntimeError("resume data has no verified flag candidate")
-        flag = str(verified_events[-1]["payload"]["flag"])
+        payload = verified_events[-1]["payload"]
+        flag = str(payload["flag"])
         for result in self._specialist_results(context):
             for candidate in result.flag_candidates:
                 if candidate.value == flag:
                     verified = candidate.model_copy(
                         update={
-                            "format_match": True,
-                            "provenance_verified": True,
-                            "replay_verified": True,
-                            "independent_verified": True,
-                            "submission_allowed": True,
+                            "format_match": payload.get("format_match") is True,
+                            "provenance_verified": payload.get("provenance_verified")
+                            is True,
+                            "replay_verified": payload.get("replay_verified") is True,
+                            "data_dependency_verified": payload.get(
+                                "data_dependency_verified"
+                            )
+                            is True,
+                            "independent_verified": payload.get(
+                                "independent_verified"
+                            )
+                            is True,
+                            "submission_allowed": False,
                         }
                     )
+                    source = (context.record.run_dir / candidate.source_artifact).resolve()
+                    if (
+                        context.record.run_dir.resolve() not in source.parents
+                        or not source.is_file()
+                    ):
+                        raise RuntimeError(
+                            "legacy verified candidate has no hashable provenance artifact"
+                        )
+                    migrated = VerifiedCandidateRecord(
+                        run_id=context.record.run_id,
+                        candidate=verified,
+                        solver_sha256=_sha256_file(context.record.run_dir / "solve.py"),
+                        source_artifact=str(source.relative_to(context.record.run_dir)),
+                        source_artifact_sha256=_sha256_file(source),
+                    )
+                    context.store.save_verified_candidate(migrated)
                     context.values["candidate"] = verified
                     return verified
         raise RuntimeError("verified candidate is absent from specialist artifacts")

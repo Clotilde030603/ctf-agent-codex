@@ -26,3 +26,17 @@ async def test_local_reproduction_requires_explicit_opt_in(tmp_path: Path) -> No
     result = await reproduce_solver(tmp_path, "flag{local}", use_docker=False)
 
     assert result.success is True
+
+
+@pytest.mark.asyncio
+async def test_reproduction_uses_same_stdout_stderr_contract_as_replay(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "solve.py").write_text(
+        "import sys\nprint('flag{stderr}', file=sys.stderr)\n",
+        encoding="utf-8",
+    )
+
+    result = await reproduce_solver(tmp_path, "flag{stderr}", use_docker=False)
+
+    assert result.success is True

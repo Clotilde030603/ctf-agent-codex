@@ -18,10 +18,10 @@ async def test_controller_owns_all_state_transitions_and_resumes(tmp_path: Path)
         RunState.PLAN,
         RunState.SOLVE,
         RunState.VERIFY,
-        RunState.SUBMIT,
-        RunState.EVIDENCE,
-        RunState.WRITEUP,
         RunState.REPRODUCE,
+        RunState.SUBMIT,
+        RunState.EVIDENCE_PENDING,
+        RunState.WRITEUP_PENDING,
     ]
     targets = states[1:] + [RunState.DONE]
 
@@ -67,6 +67,10 @@ def test_sensitive_url_query_is_redacted_from_state_and_events(tmp_path: Path) -
     assert "secret-value" not in (context.record.run_dir / "events.jsonl").read_text()
     with pytest.raises(RuntimeError, match="credential-bearing"):
         controller.resume_run(context.record.run_id)
+    assert not any(
+        event["event_type"] == "run.resumed"
+        for event in context.ledger.list(context.record.run_id)
+    )
 
     resumed = controller.resume_run(
         context.record.run_id,
