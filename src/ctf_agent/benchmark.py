@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import base64
+import binascii
 import hashlib
 import json
 import os
@@ -49,6 +50,7 @@ class BenchmarkChallenge(BaseModel):
     source_files: list[str] = Field(default_factory=list)
     metrics_file: str = "benchmark-metrics.json"
     events_file: str = "events.jsonl"
+    metrics_source: Literal["none", "self_reported"] = "none"
     clean_replay: bool = True
     clean_mode: Literal["local", "docker"] = "local"
     replay_command: list[str] | None = None
@@ -104,6 +106,7 @@ class BenchmarkRunRecord(BaseModel):
     command: CommandRecord | None = None
     clean_replay: CommandRecord | None = None
     metrics: BenchmarkMetrics = Field(default_factory=BenchmarkMetrics)
+    self_reported_metrics: BenchmarkMetrics | None = None
 
 
 class BenchmarkChallengeRecord(BaseModel):
@@ -316,7 +319,15 @@ async def _run_once(
             output = f"{command.stdout}\n{command.stderr}"
             expected_seen = _matches_expected(output, challenge)
             fixture_success = command.exit_code == 0 and expected_seen and not command.timed_out
-            metrics = _load_metrics(run_dir, challenge)
+            self_reported_metrics = (
+                _load_metrics(run_dir, challenge)
+                if challenge.metrics_source == "self_reported"
+                else None
+            )
+            metrics = BenchmarkMetrics(
+                tool_calls=1,
+                time_to_candidate_seconds=(command.seconds if expected_seen else None),
+            )
             clean_replay: CommandRecord | None = None
             clean_replay_success: bool | None = None
             clean_replay_skipped = False
@@ -334,6 +345,12 @@ async def _run_once(
                 clean_replay_success is not False
                 and not (challenge.clean_replay and clean_replay_success is None)
             )
+            metrics = metrics.model_copy(
+                update={
+                    "tool_calls": 1 + (1 if clean_replay is not None else 0),
+                    "replay_verified": clean_replay_success,
+                }
+            )
             return BenchmarkRunRecord(
                 challenge_id=challenge.id,
                 category=challenge.category,
@@ -350,6 +367,7 @@ async def _run_once(
                 command=command,
                 clean_replay=clean_replay,
                 metrics=metrics,
+                self_reported_metrics=self_reported_metrics,
             )
     except Exception as exc:
         return BenchmarkRunRecord(
@@ -465,7 +483,7 @@ def _matches_expected(text: str, challenge: BenchmarkChallenge) -> bool:
 
 def _hardcoded_solver_reason(run_dir: Path, challenge: BenchmarkChallenge) -> str | None:
     if challenge.expected_flag is None:
-        return None
+        return _hash_only_hardcoded_reason(run_dir, challenge)
     raw = challenge.expected_flag
     encoded = base64.b64encode(raw.encode()).decode()
     hexed = raw.encode().hex()
@@ -503,6 +521,41 @@ def _hardcoded_solver_reason(run_dir: Path, challenge: BenchmarkChallenge) -> st
                         f"{_relative_label(source, run_dir)}"
                     )
     return None
+
+
+def _hash_only_hardcoded_reason(
+    run_dir: Path, challenge: BenchmarkChallenge
+) -> str | None:
+    expected_hash = challenge.expected_flag_sha256
+    if expected_hash is None:
+        return None
+    for source in _solver_sources(run_dir, challenge):
+        try:
+            text = source.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        constants = _python_constant_strings(text) if source.suffix == ".py" else set()
+        for constant in constants:
+            for value in _constant_variants(constant):
+                if hashlib.sha256(value).hexdigest() == expected_hash:
+                    return (
+                        "solver source embeds value matching expected flag hash: "
+                        f"{_relative_label(source, run_dir)}"
+                    )
+    return None
+
+
+def _constant_variants(value: str) -> set[bytes]:
+    variants = {value.encode()}
+    try:
+        variants.add(base64.b64decode(value, validate=True))
+    except (ValueError, binascii.Error):
+        pass
+    try:
+        variants.add(bytes.fromhex(value))
+    except ValueError:
+        pass
+    return variants
 
 
 def _solver_sources(run_dir: Path, challenge: BenchmarkChallenge) -> list[Path]:

@@ -99,3 +99,37 @@ async def test_controller_enforces_total_run_timeout(tmp_path: Path) -> None:
         event["event_type"] == "run.timeout"
         for event in context.ledger.list(result.run_id)
     )
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_replay_state_if_event_append_crashes_after_commit(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    async def authenticate(context: RunContext) -> StateOutcome:
+        nonlocal calls
+        calls += 1
+        return StateOutcome(RunState.INGEST)
+
+    controller = Controller(
+        Settings(runs_dir=tmp_path / "runs"),
+        {RunState.AUTHENTICATE: authenticate},
+    )
+    context = controller.create_run(
+        "https://ctf.test/challenges/crash", auto_submit=False, writeup=False
+    )
+    original_append = context.ledger.append
+
+    def crashing_append(*args: object, **kwargs: object) -> int:
+        if len(args) > 1 and args[1] == "state.completed":
+            raise RuntimeError("simulated event append crash")
+        return original_append(*args, **kwargs)
+
+    context.ledger.append = crashing_append  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="simulated event append crash"):
+        await controller.execute(context)
+
+    resumed = controller.resume_run(context.record.run_id)
+    assert resumed.record.state is RunState.INGEST
+    assert calls == 1

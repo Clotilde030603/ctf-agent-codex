@@ -108,6 +108,26 @@ def test_model_planner_caps_hypotheses_at_three() -> None:
     assert backend.requests[0].context["url"] == "https://ctf.local/1"
 
 
+def test_model_planner_deduplicates_equivalent_hypotheses() -> None:
+    backend = ClaudeStubBackend(
+        [
+            json.dumps(
+                {
+                    "hypotheses": [
+                        _hypothesis_payload("h1", "Inspect encoded artifact"),
+                        _hypothesis_payload("h2", "  inspect   encoded ARTIFACT "),
+                        _hypothesis_payload("h3", "Try independent web path"),
+                    ]
+                }
+            )
+        ]
+    )
+
+    hypotheses = asyncio.run(ModelHypothesisPlanner(backend).plan({}))
+
+    assert [hypothesis.id for hypothesis in hypotheses] == ["h1", "h3"]
+
+
 def test_scheduler_runs_matching_specialists_concurrently() -> None:
     hypotheses = [
         Hypothesis(
@@ -169,6 +189,32 @@ def test_scheduler_stops_on_solved_and_preserves_flag() -> None:
     assert result.solved is True
     assert result.stop_reason == "solved"
     assert result.accepted_flags == ("flag{ok}",)
+
+
+def test_scheduler_cancels_slower_lanes_after_candidate() -> None:
+    hypothesis = Hypothesis(
+        id="h1",
+        claim="lead",
+        expected_signal="flag",
+        cost="low",
+        confidence=0.5,
+        kill_condition="none",
+        success_condition="flag",
+    )
+    scheduler = Scheduler(
+        planner=StaticHypothesisPlanner([hypothesis]),
+        specialists=(
+            FakeSpecialist("fast", delay=0.01, status="confirmed", flag="flag{fast}"),
+            FakeSpecialist("slow", delay=1.0),
+        ),
+    )
+
+    started = time.perf_counter()
+    result = asyncio.run(scheduler.run({}))
+
+    assert time.perf_counter() - started < 0.3
+    assert result.accepted_flags == ("flag{fast}",)
+    assert all(item.next_action != "slow" for item in result.specialist_results)
 
 
 def test_scheduler_preserves_other_lane_when_one_raises() -> None:

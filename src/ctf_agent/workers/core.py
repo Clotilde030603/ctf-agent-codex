@@ -8,22 +8,25 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ctf_agent.evidence.sanitizer import SecretSanitizer
+from ctf_agent.ingestion.session import ScopedAsyncSession
 from ctf_agent.models.base import ModelBackend, ModelBackendError, ModelRequest
 from ctf_agent.schemas import FlagCandidate
 
-WorkerAction = Literal["run", "write_file", "finish"]
+WorkerAction = Literal["run", "write_file", "http_request", "finish"]
 WorkerStatus = Literal["finished", "budget_exhausted", "error"]
 
 
 class WorkerDecision(BaseModel):
     """Single model-selected worker action.
 
-    The schema intentionally allows exactly three actions:
+    The schema intentionally allows exactly four actions:
     - run an argv vector from an allowlist,
     - write one relative file in the lane workspace,
+    - issue a request through a host-scoped HTTP session,
     - finish with a status message.
     """
 
@@ -31,6 +34,10 @@ class WorkerDecision(BaseModel):
     argv: list[str] = Field(default_factory=list)
     path: str | None = None
     content: str | None = None
+    method: Literal["GET", "HEAD", "POST"] | None = None
+    url: str | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: str | None = None
     message: str = ""
     facts: list[str] = Field(default_factory=list)
     flag_candidates: list[FlagCandidate] = Field(default_factory=list)
@@ -47,21 +54,52 @@ class WorkerDecision(BaseModel):
 
     @model_validator(mode="after")
     def validate_action_fields(self) -> WorkerDecision:
+        sensitive_headers = {"authorization", "cookie", "proxy-authorization"}
+        if sensitive_headers.intersection(name.lower() for name in self.headers):
+            raise ValueError("model-supplied credential headers are not allowed")
         if self.action == "run":
             if not self.argv:
                 raise ValueError("run action requires argv")
-            if self.path is not None or self.content is not None:
-                raise ValueError("run action may not include path/content")
+            if (
+                self.path is not None
+                or self.content is not None
+                or self.method is not None
+                or self.url is not None
+                or self.headers
+                or self.body is not None
+            ):
+                raise ValueError("run action may not include unrelated fields")
         elif self.action == "write_file":
             if not self.path:
                 raise ValueError("write_file action requires path")
             if self.content is None:
                 raise ValueError("write_file action requires content")
-            if self.argv:
-                raise ValueError("write_file action may not include argv")
-        elif self.action == "finish":
+            if (
+                self.argv
+                or self.method is not None
+                or self.url is not None
+                or self.headers
+                or self.body is not None
+            ):
+                raise ValueError("write_file action may not include unrelated fields")
+        elif self.action == "http_request":
+            if self.method is None or self.url is None:
+                raise ValueError("http_request action requires method and url")
             if self.argv or self.path is not None or self.content is not None:
-                raise ValueError("finish action may not include argv/path/content")
+                raise ValueError("http_request may not include argv/path/content")
+            if self.method in {"GET", "HEAD"} and self.body is not None:
+                raise ValueError(f"{self.method} action may not include a body")
+        elif self.action == "finish":
+            if (
+                self.argv
+                or self.path is not None
+                or self.content is not None
+                or self.method is not None
+                or self.url is not None
+                or self.headers
+                or self.body is not None
+            ):
+                raise ValueError("finish action may not include action-specific fields")
         return self
 
 
@@ -69,6 +107,7 @@ class WorkerBudget(BaseModel):
     max_steps: int = Field(default=8, ge=1, le=100)
     max_model_calls: int = Field(default=8, ge=1, le=100)
     max_commands: int = Field(default=4, ge=0, le=100)
+    max_http_requests: int = Field(default=8, ge=0, le=100)
     max_wall_time_seconds: float = Field(default=120.0, gt=0, le=3600)
     command_timeout_seconds: float = Field(default=20.0, gt=0, le=600)
     max_no_progress_steps: int = Field(default=3, ge=1, le=50)
@@ -117,6 +156,10 @@ class WorkerReport(BaseModel):
     stderr_artifact: str | None = None
     metadata_artifact: str | None = None
     written_path: str | None = None
+    method: str | None = None
+    url: str | None = None
+    status_code: int | None = None
+    response_artifact: str | None = None
     facts: list[str] = Field(default_factory=list)
     flag_candidates: list[FlagCandidate] = Field(default_factory=list)
     made_progress: bool = False
@@ -131,6 +174,7 @@ class WorkerResult(BaseModel):
     steps: int = 0
     model_calls: int = 0
     commands_run: int = 0
+    http_requests_run: int = 0
     elapsed_seconds: float = 0.0
     facts: list[str] = Field(default_factory=list)
     flag_candidates: list[FlagCandidate] = Field(default_factory=list)
@@ -205,6 +249,7 @@ class WorkerCore:
         policy: CommandPolicy | None = None,
         sanitizer: SecretSanitizer | None = None,
         shared_model_budget: SharedModelCallBudget | None = None,
+        http_session: ScopedAsyncSession | None = None,
     ) -> None:
         self.backend = backend
         self.workspace = workspace
@@ -212,6 +257,7 @@ class WorkerCore:
         self.policy = policy or CommandPolicy()
         self.sanitizer = sanitizer or SecretSanitizer()
         self.shared_model_budget = shared_model_budget
+        self.http_session = http_session
         self._seen_commands: set[str] = set()
         self._seen_facts: set[str] = set()
         self._seen_candidates: set[str] = set()
@@ -222,6 +268,7 @@ class WorkerCore:
         reports: list[WorkerReport] = []
         model_calls = 0
         commands_run = 0
+        http_requests_run = 0
         no_progress = 0
         context_dict = dict(context or {})
 
@@ -234,6 +281,7 @@ class WorkerCore:
                     started,
                     model_calls,
                     commands_run,
+                    http_requests_run,
                 )
             if model_calls >= self.budget.max_model_calls:
                 return self._budget_result(
@@ -242,6 +290,7 @@ class WorkerCore:
                     started,
                     model_calls,
                     commands_run,
+                    http_requests_run,
                 )
 
             if self.shared_model_budget is not None:
@@ -249,7 +298,12 @@ class WorkerCore:
                     await self.shared_model_budget.reserve()
                 except ModelBackendError as exc:
                     return self._budget_result(
-                        str(exc), reports, started, model_calls, commands_run
+                        str(exc),
+                        reports,
+                        started,
+                        model_calls,
+                        commands_run,
+                        http_requests_run,
                     )
             model_calls += 1
             try:
@@ -262,6 +316,7 @@ class WorkerCore:
                     steps=len(reports),
                     model_calls=model_calls,
                     commands_run=commands_run,
+                    http_requests_run=http_requests_run,
                     elapsed_seconds=round(time.monotonic() - started, 6),
                     **_aggregate_reports(reports),
                 )
@@ -287,6 +342,7 @@ class WorkerCore:
                         steps=step,
                         model_calls=model_calls,
                         commands_run=commands_run,
+                        http_requests_run=http_requests_run,
                         elapsed_seconds=round(time.monotonic() - started, 6),
                         facts=aggregates["facts"],
                         flag_candidates=aggregates["flag_candidates"],
@@ -295,10 +351,29 @@ class WorkerCore:
                 if decision.action == "write_file":
                     report = self._write_file(step, decision)
                     reports.append(report)
+                elif decision.action == "http_request":
+                    if http_requests_run >= self.budget.max_http_requests:
+                        return self._budget_result(
+                            "HTTP request budget exhausted",
+                            reports,
+                            started,
+                            model_calls,
+                            commands_run,
+                            http_requests_run,
+                        )
+                    report = await self._http_request(step, decision)
+                    reports.append(report)
+                    if report.status != "skipped":
+                        http_requests_run += 1
                 else:
                     if commands_run >= self.budget.max_commands:
                         return self._budget_result(
-                            "command budget exhausted", reports, started, model_calls, commands_run
+                            "command budget exhausted",
+                            reports,
+                            started,
+                            model_calls,
+                            commands_run,
+                            http_requests_run,
                         )
                     report = await self._run_command(step, decision)
                     reports.append(report)
@@ -330,6 +405,7 @@ class WorkerCore:
                     started,
                     model_calls,
                     commands_run,
+                    http_requests_run,
                 )
 
         return self._budget_result(
@@ -338,6 +414,7 @@ class WorkerCore:
             started,
             model_calls,
             commands_run,
+            http_requests_run,
         )
 
     async def _next_decision(
@@ -348,7 +425,9 @@ class WorkerCore:
                 role="worker",
                 system=(
                     "You are a sandboxed CTF worker. Return one JSON object matching the "
-                    "WorkerDecision schema. Never return shell strings; use argv arrays only."
+                    "WorkerDecision schema. Never return shell strings; use argv arrays only. "
+                    "Use http_request only for explicitly scoped challenge URLs; credentials "
+                    "are supplied by the host session and must never be placed in headers."
                 ),
                 prompt=task,
                 context={
@@ -469,6 +548,90 @@ class WorkerCore:
             sanitizer_findings=_merge_findings(stdout.findings, stderr.findings),
         )
 
+    async def _http_request(self, step: int, decision: WorkerDecision) -> WorkerReport:
+        if self.http_session is None:
+            raise WorkerExecutionError("scoped HTTP access is not configured for this lane")
+        assert decision.method is not None
+        assert decision.url is not None
+        if decision.body is not None and len(decision.body.encode("utf-8")) > 256_000:
+            raise WorkerExecutionError("HTTP request body exceeds 256000 bytes")
+        fingerprint = command_fingerprint(
+            [
+                decision.method,
+                decision.url,
+                decision.body or "",
+                json.dumps(decision.headers, sort_keys=True),
+            ]
+        )
+        if fingerprint in self._seen_commands:
+            progress = self._capture_decision_progress(decision)
+            return WorkerReport(
+                step=step,
+                action="http_request",
+                status="skipped",
+                message="duplicate HTTP request fingerprint",
+                method=decision.method,
+                url=decision.url,
+                command_fingerprint=fingerprint,
+                facts=decision.facts,
+                flag_candidates=decision.flag_candidates,
+                made_progress=progress,
+            )
+        self._seen_commands.add(fingerprint)
+        try:
+            response = await self.http_session.request(
+                decision.method,
+                decision.url,
+                headers=decision.headers,
+                content=decision.body,
+            )
+        except (httpx.HTTPError, ValueError) as exc:
+            raise WorkerExecutionError(f"scoped HTTP request failed: {exc}") from exc
+        body = self.sanitizer.sanitize(
+            _truncate(response.content, self.budget.stdout_limit)
+        )
+        artifact_prefix = f"{step:03d}-{fingerprint[:16]}"
+        response_path = self.workspace.artifacts_dir / f"{artifact_prefix}.http.txt"
+        metadata_path = self.workspace.artifacts_dir / f"{artifact_prefix}.http.json"
+        response_path.write_text(body.text, encoding="utf-8")
+        safe_headers = {
+            name: value
+            for name, value in response.headers.items()
+            if name.lower() not in {"set-cookie", "authorization", "proxy-authenticate"}
+        }
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "method": decision.method,
+                    "url": str(response.request.url),
+                    "status_code": response.status_code,
+                    "headers": safe_headers,
+                    "fingerprint": fingerprint,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return WorkerReport(
+            step=step,
+            action="http_request",
+            status="ok",
+            message=decision.message,
+            method=decision.method,
+            url=str(response.request.url),
+            status_code=response.status_code,
+            command_fingerprint=fingerprint,
+            response_artifact=str(response_path),
+            metadata_artifact=str(metadata_path),
+            facts=decision.facts,
+            flag_candidates=decision.flag_candidates,
+            made_progress=True,
+            redacted=body.redacted,
+            sanitizer_findings=_findings_to_dict(body.findings),
+        )
+
     def _capture_decision_progress(self, decision: WorkerDecision) -> bool:
         progressed = False
         for fact in decision.facts:
@@ -513,6 +676,7 @@ class WorkerCore:
         started: float,
         model_calls: int,
         commands_run: int,
+        http_requests_run: int,
     ) -> WorkerResult:
         return WorkerResult(
             status="budget_exhausted",
@@ -521,6 +685,7 @@ class WorkerCore:
             steps=len(reports),
             model_calls=model_calls,
             commands_run=commands_run,
+            http_requests_run=http_requests_run,
             elapsed_seconds=round(time.monotonic() - started, 6),
             **_aggregate_reports(reports),
         )

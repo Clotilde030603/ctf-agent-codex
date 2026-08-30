@@ -92,10 +92,7 @@ class WriteupGenerator:
             markdown = self._redact_flag_text(markdown, flag, True)
             html = self._redact_flag_text(html, flag, True)
         markdown_path.write_text(self._sanitizer.sanitize(markdown).text, encoding="utf-8")
-        html_path.write_text(
-            html,
-            encoding="utf-8",
-        )
+        html_path.write_text(self._sanitizer.sanitize(html).text, encoding="utf-8")
 
         flag_reference = self._flag_reference(flag, redact_flags=redact_flags)
         source_files = [
@@ -147,7 +144,12 @@ class WriteupGenerator:
 
         env = Environment(
             loader=FileSystemLoader(str(self._template_dir)),
-            autoescape=select_autoescape(disabled_extensions=("md", "j2")),
+            autoescape=select_autoescape(
+                enabled_extensions=("html.j2",),
+                disabled_extensions=("md.j2",),
+                default_for_string=True,
+                default=True,
+            ),
             trim_blocks=True,
             lstrip_blocks=True,
         )

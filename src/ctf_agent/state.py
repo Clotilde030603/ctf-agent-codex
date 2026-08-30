@@ -152,6 +152,45 @@ class StateStore:
             )
         return self.load(run_id)
 
+    def complete_state(
+        self,
+        run_id: str,
+        *,
+        expected_state: RunState,
+        target: RunState,
+        task_key: str,
+        error: str | None = None,
+        result_path: Path | None = None,
+    ) -> RunRecord:
+        """Atomically checkpoint a completed handler and advance its state."""
+        require_transition(expected_state, target)
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT state FROM runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown run: {run_id}")
+            current = RunState(row["state"])
+            if current is not expected_state:
+                raise InvalidTransition(
+                    f"state changed before completion: expected {expected_state}, got {current}"
+                )
+            connection.execute(
+                "INSERT OR REPLACE INTO checkpoints VALUES(?,?,?,?)",
+                (
+                    run_id,
+                    task_key,
+                    now,
+                    str(result_path) if result_path else None,
+                ),
+            )
+            connection.execute(
+                "UPDATE runs SET state=?,updated_at=?,last_error=? WHERE run_id=?",
+                (target.value, now, error, run_id),
+            )
+        return self.load(run_id)
+
     def checkpoint(self, run_id: str, task_key: str, result_path: Path | None = None) -> None:
         with self._connect() as connection:
             connection.execute(

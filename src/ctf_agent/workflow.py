@@ -38,6 +38,7 @@ from ctf_agent.triage import ScanConfig, classify_report, scan_path
 from ctf_agent.verification import (
     BlindVerifier,
     FlagGate,
+    ModelBlindReviewer,
     RejectedCandidates,
     ReplayVerifier,
     SubmissionBudget,
@@ -64,6 +65,7 @@ class AutonomousWorkflow:
         *,
         planner_backend: ModelBackend | None = None,
         solver_backend_factory: BackendFactory = create_codex_backend,
+        reviewer_backend_factory: BackendFactory = create_codex_backend,
         worker_local_test_mode: bool = False,
         worker_allowed_argv0: set[str] | None = None,
         terminal_renderer: TerminalRenderer | None = None,
@@ -72,6 +74,7 @@ class AutonomousWorkflow:
         self._adapter_override = adapter
         self._planner_backend_override = planner_backend
         self._solver_backend_factory = solver_backend_factory
+        self._reviewer_backend_factory = reviewer_backend_factory
         self._worker_local_test_mode = worker_local_test_mode
         self._worker_allowed_argv0 = worker_allowed_argv0
         self._terminal_renderer = terminal_renderer or TerminalRenderer()
@@ -310,13 +313,8 @@ class AutonomousWorkflow:
         preflight = await ArtifactSignalSpecialist().solve(
             hypotheses[0], solver_context
         )
-        specialist_results: tuple[SpecialistResult, ...]
-        if preflight.status == "confirmed" and preflight.flag_candidates:
-            specialist_results = (preflight,)
-            solved = True
-            stop_reason = "artifact_signal"
-        else:
-            preliminary_results = [preflight]
+        preliminary_results = [preflight]
+        if not (preflight.status == "confirmed" and preflight.flag_candidates):
             category_specialist = self._category_specialist(triage_data)
             category_result = None
             if category_specialist is not None:
@@ -324,61 +322,64 @@ class AutonomousWorkflow:
                     hypotheses[0], solver_context
                 )
                 preliminary_results.append(category_result)
-            if (
-                category_result is not None
-                and category_result.status == "confirmed"
-                and category_result.flag_candidates
-            ):
-                specialist_results = tuple(preliminary_results)
-                solved = True
-                stop_reason = f"category_{category_specialist.name}"
-            elif self.settings.backend != "codex":
-                specialist_results = tuple(preliminary_results)
-                solved = False
-                stop_reason = "no_model_backend"
-            else:
-                existing_model_requests = sum(
-                    event["event_type"] == "model.request"
-                    for event in context.ledger.list(context.record.run_id)
-                )
-                remaining_model_calls = max(
-                    0, self.settings.model_call_budget - existing_model_requests
+        preliminary_solved = any(
+            result.status == "confirmed" and result.flag_candidates
+            for result in preliminary_results
+        )
+        if self.settings.backend != "codex":
+            specialist_results = tuple(preliminary_results)
+            solved = preliminary_solved
+            stop_reason = "static_preflight" if solved else "no_model_backend"
+        else:
+            solver_context["preflight_results"] = [
+                result.model_dump(mode="json") for result in preliminary_results
+            ]
+            existing_model_requests = sum(
+                event["event_type"] == "model.request"
+                for event in context.ledger.list(context.record.run_id)
+            )
+            remaining_model_calls = max(
+                0, self.settings.model_call_budget - existing_model_requests
+            )
+
+            def record_solver_call(index: int) -> None:
+                context.ledger.append(
+                    context.record.run_id,
+                    "model.request",
+                    {
+                        "role": "solver",
+                        "model": self.settings.solver_model,
+                        "request_index": existing_model_requests + index,
+                    },
+                    state=RunState.SOLVE.value,
                 )
 
-                def record_solver_call(index: int) -> None:
-                    context.ledger.append(
-                        context.record.run_id,
-                        "model.request",
-                        {
-                            "role": "solver",
-                            "model": self.settings.solver_model,
-                            "request_index": existing_model_requests + index,
-                        },
-                        state=RunState.SOLVE.value,
-                    )
-
-                shared_model_budget = SharedModelCallBudget(
-                    remaining_model_calls,
-                    on_reserve=record_solver_call,
-                )
-                model_specialist = ModelSolverSpecialist(
-                    self.settings,
-                    backend_factory=self._solver_backend_factory,
-                    local_test_mode=self._worker_local_test_mode,
-                    allowed_argv0=self._worker_allowed_argv0,
-                    shared_model_budget=shared_model_budget,
-                )
-                scheduler = Scheduler(
-                    StaticHypothesisPlanner(hypotheses),
-                    (model_specialist,),
-                    no_progress_cutoff=3,
-                    max_rounds=1,
-                    max_concurrency=self.settings.max_workers,
-                )
-                result = await scheduler.run(solver_context)
-                specialist_results = tuple(preliminary_results) + result.specialist_results
-                solved = result.solved
-                stop_reason = result.stop_reason
+            shared_model_budget = SharedModelCallBudget(
+                remaining_model_calls,
+                on_reserve=record_solver_call,
+            )
+            model_specialist = ModelSolverSpecialist(
+                self.settings,
+                backend_factory=self._solver_backend_factory,
+                local_test_mode=self._worker_local_test_mode,
+                allowed_argv0=self._worker_allowed_argv0,
+                shared_model_budget=shared_model_budget,
+            )
+            scheduler = Scheduler(
+                StaticHypothesisPlanner(hypotheses),
+                (model_specialist,),
+                no_progress_cutoff=3,
+                max_rounds=1,
+                max_concurrency=self.settings.max_workers,
+            )
+            result = await scheduler.run(solver_context)
+            specialist_results = tuple(preliminary_results) + result.specialist_results
+            solved = result.solved or preliminary_solved
+            stop_reason = (
+                result.stop_reason
+                if result.solved or not preliminary_solved
+                else "model_reviewed_preflight_candidate"
+            )
         _write_json(
             context.record.run_dir / "artifacts" / "specialist-results.json",
             [item.model_dump(mode="json") for item in specialist_results],
@@ -391,6 +392,27 @@ class AutonomousWorkflow:
                 encoding="utf-8",
             )
         context.values["specialist_results"] = list(specialist_results)
+        context.ledger.append(
+            context.record.run_id,
+            "solve.round",
+            {
+                "stop_reason": stop_reason,
+                "solved": solved,
+                "results": [
+                    {
+                        "hypothesis_id": result.hypothesis_id,
+                        "status": result.status,
+                        "facts": result.facts,
+                        "artifacts": result.artifacts,
+                        "commands": result.commands,
+                        "next_action": result.next_action,
+                        "candidate_count": len(result.flag_candidates),
+                    }
+                    for result in specialist_results
+                ],
+            },
+            state=RunState.SOLVE.value,
+        )
         if not solved:
             return StateOutcome(
                 RunState.PLAN,
@@ -429,6 +451,61 @@ class AutonomousWorkflow:
                         f"{candidate.value}: {blind.failure_stage}: {blind.reason}"
                     )
                     continue
+                reviewer_reason = "separate blind process reproduced candidate"
+                if self.settings.backend == "codex":
+                    model_request_count = sum(
+                        event["event_type"] == "model.request"
+                        for event in context.ledger.list(context.record.run_id)
+                    )
+                    if model_request_count >= self.settings.model_call_budget:
+                        reasons.append(
+                            f"{candidate.value}: reviewer model call budget exhausted"
+                        )
+                        continue
+                    context.ledger.append(
+                        context.record.run_id,
+                        "model.request",
+                        {
+                            "role": "verifier",
+                            "model": self.settings.verifier_model,
+                            "request_index": model_request_count + 1,
+                        },
+                        state=RunState.VERIFY.value,
+                    )
+                    review = await ModelBlindReviewer(
+                        self.settings,
+                        context.record.run_dir,
+                        challenge.flag_policy.model_dump(mode="json"),
+                        backend_factory=self._reviewer_backend_factory,
+                    ).derive()
+                    if not review.accepted or candidate.value not in review.derived_candidates:
+                        context.ledger.append(
+                            context.record.run_id,
+                            "model.failure",
+                            {
+                                "role": "verifier",
+                                "message": review.reason,
+                                "derived_candidate_count": len(
+                                    review.derived_candidates
+                                ),
+                            },
+                            state=RunState.VERIFY.value,
+                        )
+                        reasons.append(
+                            f"{candidate.value}: reviewer: {review.reason}"
+                        )
+                        continue
+                    reviewer_reason = review.reason
+                    context.ledger.append(
+                        context.record.run_id,
+                        "model.completed",
+                        {
+                            "role": "verifier",
+                            "model": self.settings.verifier_model,
+                            "derived_candidate_count": len(review.derived_candidates),
+                        },
+                        state=RunState.VERIFY.value,
+                    )
                 verified = candidate.model_copy(
                     update={
                         "format_match": True,
@@ -448,7 +525,7 @@ class AutonomousWorkflow:
                     {
                         "accepted": True,
                         "flag": verified.value,
-                        "reason": blind.reason,
+                        "reason": f"{blind.reason}; {reviewer_reason}",
                         "format_match": verified.format_match,
                         "provenance_verified": verified.provenance_verified,
                         "replay_verified": verified.replay_verified,
@@ -864,6 +941,7 @@ class AutonomousWorkflow:
                 "flag.verification_failed",
                 "flag.submitted",
                 "model.failure",
+                "solve.round",
             }
         ][-20:]
         challenge = self._challenge(context)

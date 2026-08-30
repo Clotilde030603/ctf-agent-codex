@@ -78,7 +78,7 @@ def test_static_crypto_specialist_is_connected_to_solve_workflow(tmp_path: Path)
     outcome = asyncio.run(workflow.solve(context))
 
     assert outcome.target is RunState.VERIFY
-    assert outcome.payload["stop_reason"] == "category_crypto-deterministic"
+    assert outcome.payload["stop_reason"] == "static_preflight"
     completed = subprocess.run(
         ["python3", "solve.py"],
         cwd=context.record.run_dir,

@@ -11,7 +11,7 @@ import pytest
 from ctf_agent.config import Settings
 from ctf_agent.models.base import ModelBackend, ModelBackendError, ModelResponse
 from ctf_agent.models.claude import ClaudeStubBackend
-from ctf_agent.schemas import Challenge, FlagPolicy, RunState
+from ctf_agent.schemas import Challenge, FlagPolicy, Hypothesis, RunState
 from ctf_agent.workflow import AutonomousWorkflow
 
 
@@ -328,3 +328,70 @@ def test_solver_lanes_cannot_exceed_shared_model_budget_after_plan(tmp_path: Pat
         if event["event_type"] == "model.request"
     ]
     assert len(model_events) == 2
+
+
+def test_codex_mode_runs_model_worker_even_when_preflight_has_candidate(
+    tmp_path: Path,
+) -> None:
+    solver_backend = ClaudeStubBackend(
+        [json.dumps({"action": "finish", "message": "reviewed preflight candidate"})]
+    )
+    workflow = AutonomousWorkflow(
+        Settings(
+            backend="codex",
+            runs_dir=tmp_path / "runs",
+            max_hypotheses=1,
+            max_workers=1,
+            worker_max_steps=1,
+        ),
+        solver_backend_factory=lambda _settings, _role, _cwd: solver_backend,
+        worker_local_test_mode=True,
+    )
+    context = workflow.controller().create_run(
+        "https://ctf.test/challenges/preflight", auto_submit=False, writeup=False
+    )
+    context.values["challenge"] = Challenge(
+        id="preflight",
+        url="https://ctf.test/challenges/preflight",
+        title="Preflight",
+        flag_policy=FlagPolicy(pattern=r"flag\{[^{}]+\}"),
+    )
+    source = context.record.run_dir / "files" / "payload.txt"
+    source.write_text("flag{preflight_candidate}\n", encoding="utf-8")
+    hypothesis = {
+        "id": "H1",
+        "claim": "inspect direct artifact",
+        "supporting_evidence": [],
+        "expected_signal": "candidate",
+        "cost": "low",
+        "confidence": 0.5,
+        "required_tools": [],
+        "kill_condition": "none",
+        "success_condition": "candidate",
+    }
+    context.values["hypotheses"] = [Hypothesis.model_validate(hypothesis)]
+    triage = {
+        "classification": {"primary_category": "misc"},
+        "files": [
+            {
+                "path": str(source),
+                "relative_path": "files/payload.txt",
+                "indicators": [
+                    {
+                        "kind": "flag-like",
+                        "value": "flag{preflight_candidate}",
+                        "artifact_path": str(source),
+                        "offset": 0,
+                    }
+                ],
+            }
+        ],
+    }
+    context.values["triage"] = triage
+
+    outcome = asyncio.run(workflow.solve(context))
+
+    assert outcome.target is RunState.VERIFY
+    assert outcome.payload["stop_reason"] == "model_reviewed_preflight_candidate"
+    assert len(solver_backend.requests) == 1
+    assert solver_backend.requests[0].context["preflight_results"][0]["status"] == "confirmed"

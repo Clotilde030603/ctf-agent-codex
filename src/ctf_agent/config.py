@@ -24,10 +24,11 @@ class Settings(BaseSettings):
     model_call_budget: int = Field(default=20, ge=1, le=200)
     max_model_context_bytes: int = Field(default=512 * 1024, ge=4096)
     max_workers: int = Field(default=3, ge=1, le=3)
-    allow_static_fallback: bool = True
+    allow_static_fallback: bool = False
     total_run_timeout_seconds: float = Field(default=3600, gt=0, le=86400)
     worker_max_steps: int = Field(default=12, ge=1, le=100)
     worker_max_commands: int = Field(default=8, ge=0, le=100)
+    worker_max_http_requests: int = Field(default=8, ge=0, le=100)
     worker_wall_time_seconds: float = Field(default=600, gt=0, le=3600)
     worker_no_progress_limit: int = Field(default=3, ge=1, le=20)
     request_timeout_seconds: float = Field(default=20, gt=0, le=120)

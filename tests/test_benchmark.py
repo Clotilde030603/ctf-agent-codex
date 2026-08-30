@@ -101,7 +101,7 @@ from pathlib import Path
 metrics_json = {json.dumps(json.dumps(metrics_payload))}
 Path("benchmark-metrics.json").write_text(metrics_json, encoding="utf-8")
 secret = Path("secret.txt").read_text(encoding="utf-8").strip()
-print("flag{" + secret + "}")
+print("flag{{" + secret + "}}")
 """,
         encoding="utf-8",
     )
@@ -112,6 +112,7 @@ challenges:
   - id: metrics
     command: [python3, solve.py]
     expected_flag: flag{metric_ok}
+    metrics_source: self_reported
 """,
         encoding="utf-8",
     )
@@ -119,16 +120,22 @@ challenges:
     result = benchmark(manifest)
 
     challenge = result["challenges"][0]
-    assert challenge["wrong_submissions"] == 1
-    assert challenge["model_calls"] == 1
-    assert challenge["tool_calls"] == 1
-    assert challenge["hallucinated_candidate_rate"] == 1.0
-    assert challenge["time_to_candidate_seconds"] == 2.5
-    assert challenge["time_to_accepted_seconds"] == 3.5
+    assert challenge["wrong_submissions"] == 0
+    assert challenge["model_calls"] == 0
+    assert challenge["tool_calls"] == 2
+    assert challenge["hallucinated_candidate_rate"] is None
+    assert challenge["time_to_candidate_seconds"] > 0
+    assert challenge["time_to_accepted_seconds"] is None
     assert result["replay_verified_rate"] == 1
-    assert result["independent_verified_rate"] == 1
-    assert result["writeup_validated_rate"] == 1
-    assert result["resume_verified_rate"] == 1
+    assert result["independent_verified_rate"] is None
+    assert result["writeup_validated_rate"] is None
+    assert result["resume_verified_rate"] is None
+    self_reported = challenge["runs"][0]["self_reported_metrics"]
+    assert self_reported["wrong_submissions"] == 1
+    assert self_reported["model_calls"] == 1
+    assert self_reported["tool_calls"] == 1
+    assert self_reported["hallucinated_candidates"] == 1
+    assert self_reported["candidate_count"] == 1
 
 
 def test_benchmark_rejects_raw_expected_flag_in_solver_source(tmp_path: Path) -> None:
@@ -243,6 +250,29 @@ challenges:
 
     assert result["solved_count"] == 1
     assert result["results"][0]["clean_reproduction"] is False
+
+
+def test_hash_only_benchmark_rejects_embedded_flag_literal(tmp_path: Path) -> None:
+    expected = "flag{hash_embedded}"
+    solver = tmp_path / "solve.py"
+    solver.write_text(f"print({expected!r})\n", encoding="utf-8")
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        f"""repeat_runs: 1
+challenges:
+  - id: hash-hardcoded
+    command: [python3, solve.py]
+    expected_flag_sha256: {hashlib.sha256(expected.encode()).hexdigest()}
+    clean_replay: false
+""",
+        encoding="utf-8",
+    )
+
+    result = benchmark(manifest)
+
+    run = result["challenges"][0]["runs"][0]
+    assert run["hardcoded_rejected"] is True
+    assert "matching expected flag hash" in run["error"]
 
 
 def test_benchmark_rejects_command_path_outside_fresh_fixture(tmp_path: Path) -> None:

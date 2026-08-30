@@ -12,9 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from ctf_agent.config import Settings
+from ctf_agent.ingestion.session import ScopedAsyncSession, SessionConfig
 from ctf_agent.models.base import ModelBackend
 from ctf_agent.models.factory import create_codex_backend
 from ctf_agent.schemas import FlagCandidate, Hypothesis, SpecialistResult
+from ctf_agent.scope import HostScope
 from ctf_agent.workers import (
     CommandPolicy,
     LaneWorkspace,
@@ -76,6 +78,7 @@ class ModelSolverSpecialist:
             if isinstance(configured_model_budget, int)
             else self.settings.model_call_budget
         )
+        http_session = self._http_session(context)
         worker = WorkerCore(
             self.backend_factory(self.settings, "solver", lane_dir),
             workspace,
@@ -86,17 +89,23 @@ class ModelSolverSpecialist:
                     model_budget,
                 ),
                 max_commands=self.settings.worker_max_commands,
+                max_http_requests=self.settings.worker_max_http_requests,
                 max_wall_time_seconds=self.settings.worker_wall_time_seconds,
                 command_timeout_seconds=self.settings.tool_timeout_seconds,
                 max_no_progress_steps=self.settings.worker_no_progress_limit,
             ),
             policy=policy,
             shared_model_budget=self.shared_model_budget,
+            http_session=http_session,
         )
-        result = await worker.run(
-            self._task(hypothesis),
-            self._context(hypothesis, context, lane_dir),
-        )
+        try:
+            result = await worker.run(
+                self._task(hypothesis),
+                self._context(hypothesis, context, lane_dir),
+            )
+        finally:
+            if http_session is not None:
+                await http_session.aclose()
         report_path = lane_dir / "worker-result.json"
         report_path.write_text(
             json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
@@ -201,10 +210,38 @@ class ModelSolverSpecialist:
             "previous_attempts_and_failures": context.get(
                 "previous_attempts_and_failures", []
             ),
+            "preflight_results": context.get("preflight_results", []),
             "lane_workspace": str(lane_dir),
             "challenge_copy": "files/",
-            "network_policy": "no network; Docker commands use --network=none",
+            "network_policy": (
+                "Docker commands use --network=none. Remote access is available only "
+                "through the structured http_request action and only for authorized hosts."
+            ),
+            "authorized_service_hosts": context.get("service_hosts", []),
         }
+
+    def _http_session(self, context: Mapping[str, object]) -> ScopedAsyncSession | None:
+        challenge = context.get("challenge")
+        if not isinstance(challenge, Mapping):
+            return None
+        challenge_url = challenge.get("url")
+        if not isinstance(challenge_url, str) or not challenge_url:
+            return None
+        raw_hosts = context.get("service_hosts", [])
+        extra_hosts = [str(item) for item in raw_hosts] if isinstance(raw_hosts, list) else []
+        scope = HostScope.from_url(
+            challenge_url,
+            extra_hosts=extra_hosts,
+            allow_private_hosts=self.settings.allow_private_hosts,
+        )
+        return ScopedAsyncSession(
+            scope,
+            config=SessionConfig(
+                timeout_seconds=self.settings.request_timeout_seconds,
+                retry_budget=self.settings.retry_budget,
+                rate_limit_per_second=self.settings.rate_limit_per_second,
+            ),
+        )
 
 
 def _lane_id(hypothesis: Hypothesis) -> str:

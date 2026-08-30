@@ -6,10 +6,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
+from ctf_agent.ingestion.session import ScopedAsyncSession, SessionConfig
 from ctf_agent.models.base import ModelRequest, ModelResponse
+from ctf_agent.scope import HostScope
 from ctf_agent.workers import CommandPolicy, LaneWorkspace, WorkerBudget, WorkerCore, WorkerDecision
 
 
@@ -33,6 +36,70 @@ def test_worker_decision_schema_rejects_shell_strings() -> None:
             {"action": "write_file", "path": "../x", "content": "x", "argv": ["python3"]}
         )
     assert WorkerDecision.model_validate({"action": "finish", "message": "ok"}).action == "finish"
+    with pytest.raises(ValidationError):
+        WorkerDecision.model_validate(
+            {
+                "action": "http_request",
+                "method": "GET",
+                "url": "https://challenge.test/",
+                "headers": {"Authorization": "secret"},
+            }
+        )
+
+
+def test_worker_http_action_is_host_scoped_and_sanitized(tmp_path: Path) -> None:
+    async def run() -> tuple[Any, list[httpx.Request]]:
+        requests: list[httpx.Request] = []
+
+        async def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, text="token=supersecret\nresult=ok", request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        session = ScopedAsyncSession(
+            HostScope.from_url("https://challenge.test"),
+            config=SessionConfig(rate_limit_per_second=1000),
+            client=client,
+        )
+        backend = QueueBackend(
+            [
+                {
+                    "action": "http_request",
+                    "method": "GET",
+                    "url": "https://challenge.test/api/data",
+                },
+                {
+                    "action": "http_request",
+                    "method": "GET",
+                    "url": "https://outside.test/escape",
+                },
+                {"action": "finish", "message": "done"},
+            ]
+        )
+        worker = WorkerCore(
+            backend,
+            LaneWorkspace(tmp_path / "lane"),
+            budget=WorkerBudget(max_steps=4, max_http_requests=2),
+            http_session=session,
+        )
+        try:
+            return await worker.run("probe authorized service"), requests
+        finally:
+            await client.aclose()
+
+    result, requests = asyncio.run(run())
+
+    assert result.status == "finished"
+    assert result.http_requests_run == 1
+    assert len(requests) == 1
+    first, second = result.reports[:2]
+    assert first.status_code == 200
+    assert first.response_artifact is not None
+    response_text = Path(first.response_artifact).read_text()
+    assert "token=[REDACTED]" in response_text
+    assert "supersecret" not in response_text
+    assert second.status == "failed"
+    assert "outside allowed scope" in second.message
 
 
 def test_lane_workspace_enforces_relative_paths(tmp_path: Path) -> None:

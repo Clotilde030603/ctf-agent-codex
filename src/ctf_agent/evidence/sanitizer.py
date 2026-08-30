@@ -59,17 +59,19 @@ class SecretSanitizer:
         self._rules: tuple[_Rule, ...] = (
             _Rule(
                 "authorization_header",
-                re.compile(r"(?im)^(\s*authorization\s*:\s*)(?:bearer\s+)?[^\r\n]+"),
+                re.compile(
+                    r"(?i)(\bauthorization\s*:\s*)(?:bearer\s+)?[^\s<]+"
+                ),
                 rf"\1Bearer {REDACTION}",
             ),
             _Rule(
                 "cookie_header",
-                re.compile(r"(?im)^(\s*cookie\s*:\s*)[^\r\n]+"),
+                re.compile(r"(?i)(\bcookie\s*:\s*)[^\s<]+"),
                 rf"\1{REDACTION}",
             ),
             _Rule(
                 "set_cookie_header",
-                re.compile(r"(?im)^(\s*set-cookie\s*:\s*)[^\r\n]+"),
+                re.compile(r"(?i)(\bset-cookie\s*:\s*)[^\s<]+"),
                 rf"\1{REDACTION}",
             ),
             _Rule(

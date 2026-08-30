@@ -15,6 +15,7 @@ from .independent_review import (
     ReplayVerifier,
     VerificationOutcome,
 )
+from .model_review import ModelBlindReviewer, ModelReviewOutcome, ModelReviewResponse
 from .provenance import ProvenanceCheck, ProvenanceVerifier
 from .replay import ReplayResult, replay_solver
 from .solver_static import SolverHardcodeCheck, SolverStaticAnalyzer
@@ -28,6 +29,9 @@ __all__ = [
     "FlagPolicy",
     "GateVerifier",
     "IndependentVerifier",
+    "ModelBlindReviewer",
+    "ModelReviewOutcome",
+    "ModelReviewResponse",
     "Provenance",
     "ProvenanceCheck",
     "ProvenanceVerifier",

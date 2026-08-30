@@ -204,16 +204,19 @@ class Controller:
                     context.record.run_id, RunState.FAILED, str(exc)
                 )
                 return context.record
-            context.store.checkpoint(context.record.run_id, task_key)
+            context.record = context.store.complete_state(
+                context.record.run_id,
+                expected_state=state,
+                target=outcome.target,
+                task_key=task_key,
+                error=outcome.error,
+            )
             context.ledger.append(
                 context.record.run_id,
                 "state.completed",
                 outcome.payload,
                 state=state.value,
                 idempotency_key=task_key,
-            )
-            context.record = context.store.transition(
-                context.record.run_id, outcome.target, outcome.error
             )
             context.ledger.append(
                 context.record.run_id,

@@ -28,6 +28,23 @@ def test_checkpoint_is_idempotent(tmp_path: Path) -> None:
     assert store.is_complete("r1", "ingest")
 
 
+def test_state_completion_atomically_checkpoints_and_transitions(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.db")
+    store.create(
+        RunRecord(run_id="r1", challenge_url="https://ctf.test/c/1", run_dir=tmp_path)
+    )
+
+    record = store.complete_state(
+        "r1",
+        expected_state=RunState.AUTHENTICATE,
+        target=RunState.INGEST,
+        task_key="state:AUTHENTICATE",
+    )
+
+    assert record.state is RunState.INGEST
+    assert store.is_complete("r1", "state:AUTHENTICATE")
+
+
 def test_event_ledger_deduplicates_idempotency_key(tmp_path: Path) -> None:
     ledger = EventLedger(tmp_path / "state.db", tmp_path / "events.jsonl")
     first = ledger.append("r1", "http", {"url": "https://ctf.test"}, idempotency_key="req-1")

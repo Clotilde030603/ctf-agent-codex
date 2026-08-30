@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -119,6 +120,7 @@ class ModelHypothesisPlanner:
             ]
         except (TypeError, ValueError) as exc:
             raise ModelBackendError("planner hypotheses failed schema validation") from exc
+        hypotheses = _deduplicate_hypotheses(hypotheses)
         if not hypotheses:
             raise ModelBackendError("planner produced no valid hypotheses")
         return tuple(hypotheses)
@@ -203,8 +205,21 @@ class Scheduler:
                 )
 
         results: list[SpecialistResult] = []
-        for task in asyncio.as_completed(tasks):
-            results.append(await task)
+        pending = set(tasks)
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
+            )
+            completed = [task.result() for task in done]
+            results.extend(completed)
+            if any(
+                result.status == "confirmed" and result.flag_candidates
+                for result in completed
+            ):
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                break
         return results
 
     @classmethod
@@ -235,3 +250,17 @@ class Scheduler:
                 ),
                 confidence=0.0,
             )
+
+
+def _deduplicate_hypotheses(hypotheses: list[Hypothesis]) -> list[Hypothesis]:
+    unique: list[Hypothesis] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for hypothesis in hypotheses:
+        claim = re.sub(r"\s+", " ", hypothesis.claim.strip().casefold())
+        tools = tuple(sorted(tool.strip().casefold() for tool in hypothesis.required_tools))
+        fingerprint = (claim, tools)
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        unique.append(hypothesis)
+    return unique

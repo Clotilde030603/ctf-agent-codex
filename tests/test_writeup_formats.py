@@ -124,3 +124,20 @@ def test_redaction_covers_all_template_context_fields(tmp_path: Path) -> None:
     assert validation.ok, validation.errors
     assert "flag{public_secret}" not in outputs.markdown_path.read_text()
     assert "flag{public_secret}" not in outputs.html_path.read_text()
+
+
+def test_html_escapes_challenge_content_and_sanitizes_secrets(tmp_path: Path) -> None:
+    _write_run(tmp_path)
+    challenge = json.loads((tmp_path / "challenge.json").read_text())
+    challenge["description"] = (
+        "<script>alert('xss')</script> Authorization: Bearer super-secret-token"
+    )
+    (tmp_path / "challenge.json").write_text(json.dumps(challenge))
+
+    outputs = WriteupGenerator().generate_all(tmp_path, redact_flags=True)
+    html = outputs.html_path.read_text(encoding="utf-8")
+
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+    assert "super-secret-token" not in html
+    assert "[REDACTED]" in html
