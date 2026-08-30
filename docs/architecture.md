@@ -1,25 +1,22 @@
 # Architecture
 
-`ctf-agent-codex` is controlled by deterministic Python code. LLM calls are bounded helpers: they classify, plan, summarize, solve within a lane, verify derivations, or review write-ups. They do not choose state transitions, bypass scope checks, submit flags directly, or read unrestricted raw logs.
+`ctf-agent-codex` is a deterministic Python controller with bounded model helpers. Python owns state transitions, scope checks, verification gates, submission decisions, resume behavior, and evidence generation. Models can propose hypotheses or choose worker actions, but they cannot skip required states, widen network scope, submit directly, or mark a candidate verified.
 
 ## Runtime Layout
-
-Target package structure:
 
 ```text
 src/ctf_agent/
 |-- cli.py
 |-- config.py
 |-- engine.py
-|-- state.py
+|-- workflow.py
 |-- scheduler.py
-|-- events.py
-|-- scope.py
 |-- platforms/
 |-- ingestion/
 |-- triage/
 |-- specialists/
 |-- models/
+|-- workers/
 |-- verification/
 |-- evidence/
 `-- writeup/
@@ -27,87 +24,112 @@ src/ctf_agent/
 
 ## Controller
 
-`engine.py` owns the run. It loads configuration, creates the run directory, opens SQLite state, appends ledger events, and advances through the state machine.
+`engine.Controller` creates a run directory, opens `state.db`, appends `events.jsonl`, enforces `CTF_TOTAL_RUN_TIMEOUT_SECONDS` and `CTF_MAX_STATE_STEPS`, and advances through the registered state handlers in `workflow.AutonomousWorkflow`.
 
 Rules:
 
-- Only controller code changes state.
-- Every transition writes an event.
-- Every resumable task has an idempotency key.
-- Work that already completed successfully is not repeated on resume.
-- Wrong submissions become planner evidence and are never retried.
+- Only controller code changes `RunState`.
+- Every state start, completion, transition, error, and resume appends an event.
+- `DONE`, `READY`, and `FAILED` are terminal states.
+- `READY` is the safe manual/dry-run stop after verification and before external submission.
+- Wrong submissions are stored and are not resubmitted.
+- Pending submissions are resolved through the platform adapter or fail closed.
 
-## Event Ledger
+## Default Workflow
 
-Each run keeps both:
+The default `CTF_BACKEND=codex` path is:
 
-- `state.db`: queryable current state, checkpoints, candidates, budgets, and verified facts.
-- `events.jsonl`: append-only timeline for auditability and write-up inputs.
-
-Event records should include state transition, command, cwd, start/end times, exit code, artifact paths, network metadata, hypothesis updates, candidate decisions, submissions, evidence, and write-up review results.
-
-## Platform Boundary
-
-Adapters implement the platform contract in [platform-adapters.md](platform-adapters.md). Prefer platform APIs over browser DOM automation. Playwright is an authentication, JavaScript, and evidence tool, not the default HTTP engine.
-
-## Triage Before Reasoning
-
-The triage pipeline runs deterministic scans before any model inspects challenge content:
-
-- recursive file walk;
-- SHA-256, size, MIME, magic, entropy;
-- safe archive extraction with depth, size, and path checks;
-- strings, URLs, IPs, flag-like patterns, constants;
-- optional tools such as `file`, `strings`, `exiftool`, `binwalk`, and `checksec`;
-- artifact paths for full raw output.
-
-Models receive summaries and artifact references, not unbounded raw dumps.
-
-## Hypothesis Scheduler
-
-The planner creates at most three independent hypotheses. The scheduler runs only independent lanes in parallel. Lanes that need to edit files use isolated working directories.
-
-Specialists return structured results:
-
-```json
-{
-  "hypothesis_id": "H1",
-  "status": "confirmed",
-  "facts": [],
-  "artifacts": [],
-  "commands": [],
-  "reproduction_command": "",
-  "flag_candidates": [],
-  "next_action": "",
-  "confidence": 0.0
-}
+```text
+AutonomousWorkflow
+-> ModelHypothesisPlanner
+-> CodexCliBackend
+-> ArtifactSignalSpecialist preflight
+-> category deterministic specialist when applicable
+-> Scheduler(max_workers <= 3)
+-> ModelSolverSpecialist
+-> WorkerCore
+-> ReplayVerifier
+-> BlindVerifier
+-> platform submission
+-> evidence/write-up/reproduction
 ```
 
-The scheduler does not stop other lanes just because a flag-like string appears. Unneeded lanes stop only after verifier approval.
+`StaticHypothesisPlanner` remains as a fallback source or as the scheduler wrapper for already-created model hypotheses. Static fallback is controlled by `CTF_ALLOW_STATIC_FALLBACK`.
 
 ## Model Backend
 
-Model backends expose one interface:
+Model backends expose `complete(ModelRequest) -> ModelResponse`. The Codex backend invokes:
 
-```python
-class ModelBackend(Protocol):
-    async def run_agent(
-        self,
-        role: str,
-        context: dict,
-        output_schema: type[BaseModel],
-    ) -> BaseModel: ...
+```text
+codex exec --ephemeral --sandbox read-only --ignore-user-config --ignore-rules
 ```
 
-The first required backend is Codex. Additional backends, such as Claude, should use the same interface or provide a tested stub until connected.
+It writes a JSON schema to a temporary file, passes that schema through `--output-schema`, reads `--output-last-message`, validates byte limits, and turns malformed output, missing final-message files, timeouts, and non-zero Codex exits into `ModelBackendError`.
 
-## Evidence And Write-Up
+The model name and reasoning effort are not hardcoded in the backend. `models.factory.create_codex_backend()` selects role-specific settings from:
 
-Evidence generation is fact-bound:
+- `CTF_PLANNER_MODEL` / `CTF_PLANNER_EFFORT`
+- `CTF_SOLVER_MODEL` / `CTF_SOLVER_EFFORT`
+- `CTF_VERIFIER_MODEL` / `CTF_VERIFIER_EFFORT`
 
-- screenshot the challenge page;
-- render sanitized exploit output;
-- screenshot Accepted/Solved verdict;
-- write `evidence/manifest.json` with SHA-256, type, event ID, timestamp, and sanitizer status.
+The project passes those strings to Codex and does not assume account-level model availability.
 
-Write-ups may use only recorded inputs: challenge metadata, triage results, event ledger, verified database facts, final solver, verifier result, Accepted result, and evidence manifest.
+## Worker Lanes
+
+`workers.WorkerCore` runs a bounded observe-decide-act loop in a lane workspace under `artifacts/lanes/<hypothesis-id>-<fingerprint>/`.
+
+Allowed worker actions are schema-validated:
+
+- `run`: executes an argument vector, never a shell string.
+- `write_file`: writes a relative file inside the lane workspace.
+- `finish`: returns facts and candidates.
+
+Each lane has limits for steps, model calls, commands, command timeout, wall-clock time, and no-progress streaks. Duplicate command fingerprints are skipped. Command stdout, stderr, metadata, exit code, timeout status, redaction status, and generated files are recorded as artifacts.
+
+Default commands are restricted to `python`, `python3`, `file`, `strings`, `exiftool`, `binwalk`, and `checksec`, then executed in Docker with `--network=none`, CPU/memory/PID limits, read-only root filesystem, and the original challenge files mounted read-only. Local command execution exists only for tests or the explicit weaker reproduction mode.
+
+## Specialist Order
+
+Solving starts with low-cost deterministic work:
+
+1. `ArtifactSignalSpecialist` looks for direct preserved artifact signals.
+2. `CryptoSpecialist` handles deterministic base64, hex, and single-byte XOR recovery for crypto-like classifications.
+3. `ForensicsSpecialist` handles strings, metadata/tool output, nested extraction, and PNG text chunks for forensics/misc classifications.
+4. `StaticWebSpecialist` extracts route, parameter, auth/session, CSRF, endpoint, and direct source flag facts from downloaded web source/assets.
+5. `ModelSolverSpecialist` runs controlled model lanes when the deterministic specialists do not confirm a candidate.
+
+Pwn and reverse-engineering deep solving currently route through the generic model worker and optional tools. They are experimental rather than production-grade category solvers.
+
+## Platform Boundary
+
+Adapters implement the platform contract in [platform-adapters.md](platform-adapters.md). Platform detection probes CTFd and rCTF API signatures before falling back to generic HTML. Adapters prefer HTTP APIs over browser DOM automation. Playwright is used for first login, storage-state reuse, JavaScript/session handling, and evidence screenshots.
+
+## Verification And Evidence
+
+Candidates move through separate checks:
+
+```text
+format_match
+provenance_verified
+replay_verified
+independent_verified
+submission_allowed
+```
+
+Replay success alone does not set `independent_verified`. `BlindVerifier` copies only the solver and preserved source artifacts into a clean temporary directory, runs without exposing the expected flag, rejects hardcoded solvers, and runs a negative control without source artifacts.
+
+Evidence generation records real files or explicit capture failures. It does not create fake PNGs when browser or terminal capture fails.
+
+## Write-Up Inputs
+
+Write-ups use only recorded run facts:
+
+- `challenge.json`
+- `triage.json`
+- `hypotheses.json`
+- `events.jsonl`
+- final `solve.py`
+- submission outcome
+- `evidence/manifest.json`
+
+The generator writes `writeup.md`, `writeup.html`, and `provenance.json`. The validator checks required sections, evidence hashes, unsupported flag-looking values, generated-output provenance, and secret-like material.

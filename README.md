@@ -9,12 +9,12 @@
 
 **A Codex-powered autonomous CTF agent that collects a challenge, analyzes and solves it, verifies and submits the flag, captures evidence, and generates a reproducible write-up.**
 
-> Project status: **experimental, executable vertical slice**. The deterministic workflow, CTFd API path, verification gate, evidence pipeline, resume support, and local fixtures are implemented and tested. Deep model-driven category solvers are not yet complete.
+> Project status: **experimental, executable vertical slice**. The default `codex` path now wires the Codex planner and controlled model-worker lanes into the deterministic workflow, while CTFd/rCTF adapters, verification gates, evidence, resume, and local fixtures remain test-backed. Deep pwn/rev support and live-platform compatibility are still experimental.
 
 What you get:
 
 - challenge collection from one URL, with session reuse and attachment download;
-- recursive triage, classification, and up to three hypothesis lanes;
+- recursive triage, classification, Codex-planned hypotheses, and up to three isolated worker lanes;
 - provenance-aware flag verification before any submission;
 - Accepted/Wrong parsing with a durable submission budget;
 - `solve.py`, evidence images, an event ledger, and `writeup.md`;
@@ -64,12 +64,12 @@ The project also preserves the work product. A successful run is meant to leave 
 | Category classification | Experimental | Classifies web, pwn, rev, crypto, forensics, misc, and mixed signals |
 | Hypothesis scheduler | Implemented | Up to three concurrent, structured lanes |
 | Built-in solver | Experimental | Reproduces direct flag-bearing artifact signals into `solve.py` |
-| Category-specific exploit solvers | Planned | Full web/pwn/rev/crypto/forensics model-driven solvers are not wired into the default workflow |
-| Codex backend | Experimental | Async CLI adapter and schema validation are tested; default workflow currently uses the deterministic specialist |
+| Category-specific solvers | Experimental | Crypto, forensics/misc, and static web specialists run before model lanes; pwn/rev rely on the model worker and optional tools |
+| Codex backend | Experimental | Async CLI adapter, schema validation, planner calls, and controlled worker calls are wired into `backend=codex` |
 | Claude backend | Stub | Testable adapter stub only; no production Claude connection |
-| Flag verification gate | Implemented | Format, placeholder, provenance, replay, Wrong-history, and budget checks |
+| Flag verification gate | Implemented | Format, placeholder, provenance, clean replay, negative control, blind Codex re-derivation, Wrong-history, and budget checks |
 | Automatic submission | Experimental | CTFd submission, verdict parsing, crash-safe pending attempts, duplicate prevention |
-| Evidence and write-up | Experimental | Three evidence images, sanitized transcript, manifest, generated and validated Markdown |
+| Evidence and write-up | Experimental | Three evidence images, sanitized transcript, manifest, Markdown, HTML, and provenance JSON |
 | Resume | Implemented | Durable SQLite state plus append-only JSONL events |
 | Benchmark runner | Implemented | Offline YAML manifests with solve timing and reproduction metrics |
 
@@ -97,13 +97,13 @@ The table distinguishes deterministic analysis from autonomous deep solving.
 
 | Category | Analysis status | Autonomous solving status | Main tooling |
 | --- | --- | --- | --- |
-| Web | Experimental | Planned beyond direct artifact signals | `httpx`, Playwright, route/URL/session indicators |
-| Pwn | Experimental | Planned | `file`, `strings`, optional `checksec`; pwntools integration is not included yet |
-| Reverse engineering | Experimental | Planned | Imports/strings/language signals; Ghidra/ReVa integration is planned |
-| Crypto math | Experimental | Planned | Deterministic constant and vocabulary detection |
-| Crypto binary | Experimental | Planned | Encoding/crypto implementation indicators |
-| Forensics | Experimental | Experimental for direct artifact signals | Metadata-oriented triage, archive provenance, optional `exiftool`/`binwalk` |
-| Misc / mixed | Experimental | Planned dynamic routing | Weighted multi-category classification |
+| Web | Experimental | Static source/asset analysis plus model-worker fallback and host-scoped HTTP actions | `httpx`, Playwright, route/URL/session indicators |
+| Pwn | Experimental | Model-worker only; deep exploitation is not production-grade | `file`, `strings`, optional `checksec`; pwntools/GDB/ROP tooling must be supplied by the environment |
+| Reverse engineering | Experimental | Model-worker only; deep reversing is not production-grade | Imports/strings/language signals; optional binary tools must be supplied by the environment |
+| Crypto math | Experimental | Deterministic base64/hex/single-byte XOR recovery plus model-worker fallback | Python; PyCryptodome/z3/Sage are optional environment tools, not installed by the agent |
+| Crypto binary | Experimental | Deterministic encoding/XOR recovery plus model-worker fallback | Python and preserved artifacts |
+| Forensics | Experimental | Deterministic strings, metadata/tool-output, nested extraction, and PNG text chunks plus model-worker fallback | Metadata-oriented triage, archive provenance, optional `exiftool`/`binwalk` |
+| Misc / mixed | Experimental | Deterministic artifact signals plus model-worker fallback | Weighted multi-category classification |
 
 Do not interpret category detection as a claim that every challenge in that category can already be solved autonomously.
 
@@ -113,7 +113,7 @@ Do not interpret category detection as a claim that every challenge in that cate
 | --- | --- | --- | --- | --- |
 | CTFd | Experimental, integration-tested | API session check; optional Playwright login and storage reuse | API first, HTML fallback | Yes |
 | Generic HTML | Experimental | Public/basic HTTP fetch; a custom session must be injected in code | Title, description, links, and flag hints | No generic submission endpoint |
-| rCTF | Planned | Not implemented | Generic fallback only | No |
+| rCTF | Experimental, fake-integration-tested | `/api/v1/auth/test` session check | `/api/v1` or `/api/v2` challenge list and attachment mapping | Yes, through `/api/v1/challs/<id>/submit` |
 
 The automated test suite uses fake and `httpx.MockTransport` CTFd fixtures. It does not contain a real account, cookie, or active competition flag.
 
@@ -121,9 +121,9 @@ The automated test suite uses fake and `httpx.MockTransport` CTFd fixtures. It d
 
 - Release: `0.1.0`
 - Overall maturity: **Experimental**
-- Automated tests: 50 unit/integration tests in the current branch
+- Automated tests: the current branch includes unit and fake-integration coverage for planner/workers, verification, CTFd/rCTF adapters, evidence/write-up, and benchmark metrics
 - Verified workflow: fake/Mock CTFd ingestion → triage → candidate → verification → Accepted → evidence → write-up → reproduction
-- Not yet verified against: every CTFd theme/version, live MFA providers, native Windows, or a real deep exploit challenge
+- Not yet verified against: every CTFd/rCTF theme/version, live MFA providers, native Windows, or a real deep exploit challenge
 
 For milestone details, see [docs/implementation-log.md](docs/implementation-log.md).
 
@@ -177,9 +177,9 @@ For development dependencies, install `.[dev,browser]` instead.
 
 ## Codex Setup
 
-The project includes a tested asynchronous Codex CLI backend, but model-driven specialist execution remains experimental and is not the default solver path yet.
+The project includes a tested asynchronous Codex CLI backend. With the default `CTF_BACKEND=codex`, the workflow calls `ModelHypothesisPlanner`, always runs controlled model-worker lanes with deterministic preflight results as context, and requires a separate blind verifier-model derivation before submission. Set `CTF_BACKEND=static` explicitly for the deterministic-only path.
 
-According to the [official Codex CLI documentation](https://developers.openai.com/codex/cli), macOS and Linux users can install or update Codex with:
+According to the [official OpenAI Codex CLI documentation](https://learn.chatgpt.com/docs/codex/cli), macOS and Linux users can install or update Codex with:
 
 ```bash
 curl -fsSL https://chatgpt.com/codex/install.sh | sh
@@ -198,7 +198,7 @@ codex --version
 codex
 ```
 
-This repository does not store your Codex credentials. Codex authentication is managed by the Codex CLI itself. `CTF_CODEX_BINARY` is a centralized setting reserved for model-workflow wiring; the default deterministic workflow does not currently consume it.
+This repository does not store your Codex credentials. Codex authentication is managed by the Codex CLI itself. `CTF_CODEX_BINARY` selects the executable used by planner and worker model calls.
 
 ## First-Time Authentication
 
@@ -233,7 +233,7 @@ ctf-agent solve "https://ctf.example.com/challenges/123" \
   --writeup
 ```
 
-The current end-to-end completion path expects `--auto-submit`. If you omit it, the agent performs collection, triage, solving, and verification but fails closed at the external submission boundary instead of submitting the candidate.
+Use `--auto-submit` only when the event rules allow automated submission. Without `--auto-submit`, or with `--dry-run`, the agent can stop at `READY` after verification and write `verified-candidate.json` for private manual review instead of submitting the candidate.
 
 ## Usage
 
@@ -266,10 +266,28 @@ ctf-agent solve "<challenge-url>" \
   --writeup
 ```
 
+Run the same workflow without external submission:
+
+```bash
+ctf-agent solve "<challenge-url>" \
+  --backend codex \
+  --dry-run \
+  --writeup
+```
+
 Disable the Markdown write-up while keeping the Accepted/evidence/reproduction path:
 
 ```bash
 ctf-agent solve "<challenge-url>" --auto-submit --no-writeup
+```
+
+Generate public write-up files without exposing the raw flag:
+
+```bash
+ctf-agent solve "<challenge-url>" \
+  --auto-submit \
+  --writeup \
+  --redact-flag
 ```
 
 Store runs elsewhere:
@@ -296,7 +314,7 @@ ctf-agent solve "<challenge-url>" \
 
 This opt-in runs `python3 -I solve.py` on the host. It is not equivalent to clean Docker reproduction.
 
-There is currently no `status`, `--session`, or `--no-submit` option. Do not rely on examples from design documents or older plans; use `--help`.
+There is currently no `status`, `--session`, or `--no-submit` option. Use `--dry-run` for a non-submitting run and `--help` as the local source of truth.
 
 ## Automatic Flag Verification and Submission
 
@@ -376,7 +394,10 @@ runs/<challenge-host>/<challenge-path>-<run-id>/
 │   ├── 02-exploit-proof.png
 │   ├── 03-accepted.png
 │   └── manifest.json
-└── writeup.md
+├── writeup.md
+├── writeup.html
+├── provenance.json
+└── verified-candidate.json  # READY/manual path only
 ```
 
 Most useful files:
@@ -384,7 +405,8 @@ Most useful files:
 | File | Purpose |
 | --- | --- |
 | `solve.py` | Final reproducible solver for the preserved challenge files |
-| `writeup.md` | Fact-bound generated solution document |
+| `writeup.md`, `writeup.html` | Fact-bound generated solution documents |
+| `provenance.json` | Source and generated-output hashes for the write-up set |
 | `evidence/` | Challenge, exploit, Accepted proof, and integrity manifest |
 | `state.db` | State, checkpoints, rejected candidates, and submission attempts for resume |
 | `events.jsonl` | Append-only state, verification, submission, and reproduction history |
@@ -406,18 +428,19 @@ cp .env.example .env
 | Variable | Default | Effect / trade-off |
 | --- | --- | --- |
 | `CTF_RUNS_DIR` | `runs` | Run and session root; keep it outside tracked source if desired |
-| `CTF_REQUEST_TIMEOUT_SECONDS` | `20` | HTTP request timeout setting; full adapter wiring is planned |
+| `CTF_REQUEST_TIMEOUT_SECONDS` | `20` | HTTP request timeout used by scoped platform sessions |
 | `CTF_TOOL_TIMEOUT_SECONDS` | `30` | Triage tools and solver replay timeout; browser/terminal capture currently has its own 30-second default |
-| `CTF_RETRY_BUDGET` | `2` | Reserved setting; retry enforcement is planned |
-| `CTF_SUBMISSION_BUDGET` | `3` | Maximum durable submission attempts per run |
-| `CTF_MAX_HYPOTHESES` | `3` | Configured cap; default workflow currently creates three hypotheses |
+| `CTF_RETRY_BUDGET` | `2` | HTTP retry budget used by scoped platform sessions |
+| `CTF_SUBMISSION_BUDGET` | `1` | Maximum durable submission attempts per run |
+| `CTF_MAX_HYPOTHESES` | `3` | Planner cap; no more than three hypotheses are scheduled |
 | `CTF_MAX_STATE_STEPS` | `100` | Stops deterministic replanning loops |
 | `CTF_MAX_EXTRACTION_DEPTH` | `3` | Archive recursion limit |
 | `CTF_MAX_EXTRACTED_BYTES` | `268435456` | Total extraction ceiling, 256 MiB |
-| `CTF_RATE_LIMIT_PER_SECOND` | `2` | Reserved setting; request pacing enforcement is planned |
+| `CTF_RATE_LIMIT_PER_SECOND` | `2` | Request pacing used by scoped platform sessions |
 | `CTF_BROWSER_STORAGE_STATE` | unset | Explicit Playwright storage-state location |
 | `CTF_ALLOW_PRIVATE_HOSTS` | `false` | Allows private/loopback targets; use only for authorized labs |
 | `CTF_ALLOW_LOCAL_REPRODUCTION` | `false` | Replaces Docker gate with weaker host `python -I` replay |
+| `CTF_REDACT_FLAG` | `false` | Redacts the verified flag in generated Markdown, HTML, and provenance |
 | `CTF_DOCKER_IMAGE` | `python:3.12-slim` | Image used for clean solver replay |
 
 The `.env` file is Git-ignored. Never put a real flag, cookie, password, or API key in `.env.example`.
@@ -438,9 +461,17 @@ The `.env` file is Git-ignored. Never put a real flag, cookie, password, or API 
 | `CTF_MODEL_CALL_BUDGET` | `20` |
 | `CTF_MAX_MODEL_CONTEXT_BYTES` | `524288` |
 | `CTF_MAX_WORKERS` | `3` |
-| `CTF_ALLOW_STATIC_FALLBACK` | `true` |
+| `CTF_ALLOW_STATIC_FALLBACK` | `false` |
+| `CTF_TOTAL_RUN_TIMEOUT_SECONDS` | `3600` |
+| `CTF_WORKER_MAX_STEPS` | `12` |
+| `CTF_WORKER_MAX_COMMANDS` | `8` |
+| `CTF_WORKER_MAX_HTTP_REQUESTS` | `8` |
+| `CTF_WORKER_WALL_TIME_SECONDS` | `600` |
+| `CTF_WORKER_NO_PROGRESS_LIMIT` | `3` |
 
-These settings are implemented and centralized, but they are not yet wired into the default deterministic workflow. Model-driven category solvers and cost reporting remain roadmap work. Model availability and reasoning-effort support depend on the user's Codex account and current Codex CLI.
+The planner, solver, and verifier model names are passed through as user-provided strings. The agent does not assume that any specific account can run a named model or reasoning effort. A common local policy is to use a stronger security-oriented model for hard web/pwn/rev lanes and a general Codex model for orchestration, triage, and write-up review; see [docs/model-routing.md](docs/model-routing.md).
+
+Model-worker execution records model-call counts, command reports, and wall-clock budgets. Token and cost accounting depend on backend support and are not guaranteed in this release.
 
 The Claude adapter is a test stub. There is no production Claude authentication or API call in this release.
 
@@ -460,7 +491,7 @@ Use this tool only against targets you are explicitly authorized to test: CTF co
 
 Before enabling automatic submission, check whether the competition permits AI tools, automated solvers, and automated flag submission. Authorization is the user's responsibility.
 
-See [docs/security.md](docs/security.md) and [docs/verification.md](docs/verification.md).
+See [docs/security-model.md](docs/security-model.md), [docs/security.md](docs/security.md), and [docs/verification.md](docs/verification.md).
 
 ## Troubleshooting
 
@@ -502,7 +533,7 @@ See [docs/security.md](docs/security.md) and [docs/verification.md](docs/verific
 ### The platform is not CTFd
 
 - Symptom: ingestion falls back to incomplete generic HTML or submission is unavailable.
-- Fix: implement a platform adapter. rCTF API support is planned, not currently complete.
+- Fix: check whether auto-detection selected `rctf` or `generic`. rCTF has an experimental API adapter; generic HTML can collect content and attachments but cannot guess a submission endpoint.
 
 ### Docker reproduction fails
 
@@ -584,13 +615,21 @@ ctf-agent benchmark evals/manifest.yaml
 Manifest shape:
 
 ```yaml
+repeat_runs: 3
+timeout_seconds: 30
+total_budget_seconds: 300
 challenges:
   - id: local-retired-warmup
+    category: warmup
+    difficulty: retired
     command: [python3, fixtures/retired-warmup/solve.py]
     expected_flag: flag{retired_fixture_only}
+    clean_mode: local
 ```
 
-The current runner reports solved count, elapsed seconds, Solved@15m/30m/60m, Wrong count (currently fixed at zero for command fixtures), exit code, and a `clean_reproduction_rate` compatibility field that currently equals command success. It does **not** perform a separate clean-environment replay. Model/token cost, independent reproduction, and repeat-run reporting are planned.
+The current runner supports repeat runs, per-challenge category and difficulty fields, per-run timeouts, an overall budget, hardcoded-solver rejection, optional local or Docker clean replay, and metrics derived from `benchmark-metrics.json` or `events.jsonl`. It reports solve rate, fixture command success, clean reproduction, Wrong submissions, model/tool calls, hallucinated-candidate rate, replay and independent verification rates, resume verification, and write-up validation.
+
+This supersedes older README text that said the runner does **not** perform a separate clean-environment replay; the current runner performs clean replay when `clean_replay` is enabled. Token and monetary cost reporting are still limited to metrics supplied by the fixture or event ledger.
 
 ## Roadmap
 
@@ -602,14 +641,15 @@ The current runner reports solved count, elapsed seconds, Solved@15m/30m/60m, Wr
 - [x] Crash-safe CTFd submission and verdict parsing
 - [x] Evidence manifest, sanitized transcript, and generated write-up
 - [x] Fake/Mock CTFd end-to-end and benchmark fixtures
-- [ ] Wire model-backed Codex specialists into the default workflow
-- [ ] Production category specialists for web, pwn, reverse, crypto, and forensics
-- [ ] Complete rCTF API/authentication/submission adapter
+- [x] Wire model-backed Codex planner and controlled solver workers into the default workflow
+- [x] Experimental crypto, forensics/misc, and static web specialists
+- [x] Experimental rCTF API authentication, collection, attachment, submission, and pending-verdict resolution
+- [ ] Production-grade pwn/rev deep exploitation support
+- [ ] Live validation for broad CTFd/rCTF versions and themes
 - [ ] Live-platform compatibility matrix and selector profiles
 - [ ] Remote-service replay verification
 - [ ] Production Claude backend
-- [ ] Enforce configured HTTP retry and pacing policies
-- [ ] Expanded benchmark cost, tool-call, and repeatability metrics
+- [ ] Backend-provided token/cost accounting in benchmark reports
 - [ ] Native Windows validation
 
 ## Contributing

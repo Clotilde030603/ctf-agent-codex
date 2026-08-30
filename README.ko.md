@@ -9,12 +9,12 @@
 
 **문제 URL 입력부터 분석, 풀이, 플래그 검증·제출, Accepted 증적 캡처, 재현 가능한 Write-up 작성까지 자동화하는 Codex 기반 CTF 에이전트입니다.**
 
-> 프로젝트 상태: **실행 가능한 experimental vertical slice**. 결정론적 workflow, CTFd API 경로, 검증 게이트, 증적, resume, 로컬 fixture는 구현·테스트되었습니다. 심화 model 기반 category solver는 아직 완성되지 않았습니다.
+> 프로젝트 상태: **실행 가능한 experimental vertical slice**. 기본 `codex` 경로는 Codex planner와 통제된 model worker lane을 결정론적 workflow에 연결합니다. CTFd/rCTF adapter, 검증 gate, 증적, resume, 로컬 fixture는 test-backed 상태입니다. 깊은 pwn/rev 지원과 live platform 호환성은 아직 experimental입니다.
 
 사용자가 얻게 되는 결과:
 
 - URL 하나로 문제 정보 수집, 인증 세션 재사용, 첨부파일 다운로드
-- 재귀적 triage, category 분류, 최대 3개 가설 lane
+- 재귀적 triage, category 분류, Codex 기반 가설 계획, 최대 3개 격리 worker lane
 - 제출 전 provenance 기반 플래그 검증
 - durable submission budget을 적용한 Accepted/Wrong 판독
 - `solve.py`, 증적 이미지, event ledger, `writeup.md`
@@ -64,12 +64,12 @@ AUTHENTICATE -> INGEST -> TRIAGE -> PLAN -> SOLVE -> VERIFY
 | category 분류 | Experimental | web, pwn, rev, crypto, forensics, misc, mixed signal 분류 |
 | 가설 scheduler | Implemented | 최대 3개의 구조화된 비동기 lane |
 | 기본 solver | Experimental | artifact에서 직접 발견되는 flag signal을 `solve.py`로 재현 |
-| category별 exploit solver | Planned | web/pwn/rev/crypto/forensics 심화 solver는 기본 workflow에 아직 연결되지 않음 |
-| Codex backend | Experimental | 비동기 CLI adapter와 schema 검증 테스트 완료, 기본 workflow는 deterministic specialist 사용 |
+| category별 solver | Experimental | Crypto, forensics/misc, static web specialist가 model lane 전에 실행됨. pwn/rev는 model worker와 선택 도구에 의존 |
+| Codex backend | Experimental | 비동기 CLI adapter, schema 검증, planner 호출, 통제된 worker 호출이 `backend=codex`에 연결됨 |
 | Claude backend | Stub | 테스트 가능한 stub만 존재하며 실제 Claude 연결 없음 |
-| 플래그 검증 게이트 | Implemented | format, placeholder, provenance, replay, Wrong 이력, budget 검사 |
+| 플래그 검증 게이트 | Implemented | format, placeholder, provenance, clean replay, negative control, blind Codex 재도출, Wrong 이력, budget 검사 |
 | 자동 제출 | Experimental | CTFd 제출·판독, durable pending attempt, 중복 제출 방지 |
-| 증적과 Write-up | Experimental | 이미지 3종, 정제된 transcript, manifest, Markdown 생성·검수 |
+| 증적과 Write-up | Experimental | 이미지 3종, 정제된 transcript, manifest, Markdown, HTML, provenance JSON 생성·검수 |
 | Resume | Implemented | SQLite 상태와 append-only JSONL event |
 | Benchmark | Implemented | offline YAML command fixture와 시간·재현 지표 |
 
@@ -97,13 +97,13 @@ flowchart LR
 
 | Category | 분석 상태 | 자율 풀이 상태 | 주요 도구 |
 | --- | --- | --- | --- |
-| Web | Experimental | 직접 artifact signal 이외 Planned | `httpx`, Playwright, route/URL/session indicator |
-| Pwn | Experimental | Planned | `file`, `strings`, 선택적 `checksec`; pwntools 미포함 |
-| Reverse engineering | Experimental | Planned | import/strings/language signal; Ghidra/ReVa 연동 예정 |
-| Crypto math | Experimental | Planned | 수학·상수 vocabulary 탐지 |
-| Crypto binary | Experimental | Planned | encoding/crypto 구현 indicator |
-| Forensics | Experimental | 직접 artifact signal은 Experimental | metadata 중심 triage, archive provenance, 선택적 `exiftool`/`binwalk` |
-| Misc / mixed | Experimental | Planned dynamic routing | 가중치 기반 복수 category 분류 |
+| Web | Experimental | 정적 source/asset 분석, model-worker fallback, host-scoped HTTP action | `httpx`, Playwright, route/URL/session indicator |
+| Pwn | Experimental | model-worker 전용. 깊은 exploit 작성은 production-grade가 아님 | `file`, `strings`, 선택적 `checksec`; pwntools/GDB/ROP 도구는 환경에 별도 설치 필요 |
+| Reverse engineering | Experimental | model-worker 전용. 깊은 reversing은 production-grade가 아님 | import/strings/language signal; binary 도구는 환경에 별도 설치 필요 |
+| Crypto math | Experimental | deterministic base64/hex/single-byte XOR 복구와 model-worker fallback | Python; PyCryptodome/z3/Sage는 agent가 설치하지 않는 선택 도구 |
+| Crypto binary | Experimental | deterministic encoding/XOR 복구와 model-worker fallback | Python과 보존 artifact |
+| Forensics | Experimental | strings, metadata/tool output, nested extraction, PNG text chunk 분석과 model-worker fallback | metadata 중심 triage, archive provenance, 선택적 `exiftool`/`binwalk` |
+| Misc / mixed | Experimental | deterministic artifact signal과 model-worker fallback | 가중치 기반 복수 category 분류 |
 
 분류할 수 있다는 것이 해당 category의 모든 문제를 자율적으로 해결할 수 있다는 의미는 아닙니다.
 
@@ -113,7 +113,7 @@ flowchart LR
 | --- | --- | --- | --- | --- |
 | CTFd | Experimental, integration-tested | API 세션 확인, 선택적 Playwright 로그인·재사용 | API 우선, HTML fallback | 지원 |
 | Generic HTML | Experimental | 공개/basic HTTP fetch, custom session은 코드에서 주입해야 함 | 제목, 설명, link, flag hint | generic 제출 endpoint 없음 |
-| rCTF | Planned | 미구현 | generic fallback만 존재 | 미지원 |
+| rCTF | Experimental, fake integration-tested | `/api/v1/auth/test` 세션 확인 | `/api/v1` 또는 `/api/v2` challenge list와 attachment mapping | `/api/v1/challs/<id>/submit` 경유 지원 |
 
 테스트 suite는 fake 및 `httpx.MockTransport` CTFd fixture를 사용합니다. 실제 계정, cookie, 활성 대회 flag는 포함하지 않습니다.
 
@@ -121,9 +121,9 @@ flowchart LR
 
 - Release: `0.1.0`
 - 전체 성숙도: **Experimental**
-- 자동화 테스트: 현재 branch 기준 unit/integration 50개
+- 자동화 테스트: 현재 branch는 planner/worker, 검증, CTFd/rCTF adapter, 증적/Write-up, benchmark metric에 대한 unit/fake-integration coverage 포함
 - 검증된 흐름: fake/Mock CTFd 수집 → triage → 후보 → 검증 → Accepted → 증적 → Write-up → 재현
-- 아직 검증하지 않은 범위: 모든 CTFd theme/version, 실제 MFA provider, native Windows, 심화 exploit 문제
+- 아직 검증하지 않은 범위: 모든 CTFd/rCTF theme/version, 실제 MFA provider, native Windows, 심화 exploit 문제
 
 마일스톤 기록은 [docs/implementation-log.md](docs/implementation-log.md)를 참고하십시오.
 
@@ -177,9 +177,9 @@ ctf-agent --help
 
 ## Codex 설정
 
-프로젝트에는 테스트된 비동기 Codex CLI backend가 있지만, model 기반 specialist 실행은 experimental이며 기본 solver 경로가 아닙니다.
+프로젝트에는 테스트된 비동기 Codex CLI backend가 있습니다. 기본 `CTF_BACKEND=codex`에서는 `ModelHypothesisPlanner`를 호출하고, deterministic preflight 결과를 context로 전달한 통제된 model-worker lane을 항상 실행하며, 제출 전에 별도의 blind verifier model 재도출을 요구합니다. 결정론적 경로만 사용하려면 `CTF_BACKEND=static`을 명시하십시오.
 
-[OpenAI 공식 Codex CLI 문서](https://developers.openai.com/codex/cli)에 따르면 macOS/Linux에서 다음 명령으로 설치·업데이트할 수 있습니다.
+[OpenAI 공식 Codex CLI 문서](https://learn.chatgpt.com/docs/codex/cli)에 따르면 macOS/Linux에서 다음 명령으로 설치·업데이트할 수 있습니다.
 
 ```bash
 curl -fsSL https://chatgpt.com/codex/install.sh | sh
@@ -198,7 +198,7 @@ codex --version
 codex
 ```
 
-이 저장소는 Codex 자격증명을 저장하지 않습니다. 인증은 Codex CLI가 관리합니다. `CTF_CODEX_BINARY`는 model workflow 연결을 위해 중앙화한 예약 설정이며 기본 deterministic workflow는 아직 이 값을 사용하지 않습니다.
+이 저장소는 Codex 자격증명을 저장하지 않습니다. 인증은 Codex CLI가 관리합니다. `CTF_CODEX_BINARY`는 planner와 worker model 호출에 사용할 executable을 지정합니다.
 
 ## 최초 CTF 플랫폼 인증
 
@@ -233,7 +233,7 @@ ctf-agent solve "https://ctf.example.com/challenges/123" \
   --writeup
 ```
 
-현재 end-to-end 완료 경로에는 `--auto-submit`이 필요합니다. 이 옵션을 생략하면 수집·triage·풀이·검증까지 진행하지만 외부 제출 경계에서 실제 제출 없이 fail-closed 합니다.
+`--auto-submit`은 대회 규정이 자동 제출을 허용할 때만 사용하십시오. `--auto-submit`을 생략하거나 `--dry-run`을 사용하면 검증 후 `READY` 상태에서 멈추고 실제 제출 대신 private 검토용 `verified-candidate.json`을 기록할 수 있습니다.
 
 ## 사용법
 
@@ -266,10 +266,28 @@ ctf-agent solve "<challenge-url>" \
   --writeup
 ```
 
+외부 제출 없이 같은 workflow 실행:
+
+```bash
+ctf-agent solve "<challenge-url>" \
+  --backend codex \
+  --dry-run \
+  --writeup
+```
+
 Accepted 증적과 재현은 수행하되 Markdown 문서는 생략:
 
 ```bash
 ctf-agent solve "<challenge-url>" --auto-submit --no-writeup
+```
+
+원본 flag를 노출하지 않는 공개용 Write-up 파일 생성:
+
+```bash
+ctf-agent solve "<challenge-url>" \
+  --auto-submit \
+  --writeup \
+  --redact-flag
 ```
 
 다른 위치에 실행 결과 저장:
@@ -296,7 +314,7 @@ ctf-agent solve "<challenge-url>" \
 
 이 옵션은 host에서 `python3 -I solve.py`를 실행하며 clean Docker reproduction과 동등하지 않습니다.
 
-현재 `status`, `--session`, `--no-submit` option은 없습니다. 오래된 설계 예시가 아니라 `--help`를 따르십시오.
+현재 `status`, `--session`, `--no-submit` option은 없습니다. 제출하지 않는 실행에는 `--dry-run`을 사용하고, 로컬 기준은 `--help`를 따르십시오.
 
 ## 자동 플래그 검증과 제출
 
@@ -376,7 +394,10 @@ runs/<challenge-host>/<challenge-path>-<run-id>/
 │   ├── 02-exploit-proof.png
 │   ├── 03-accepted.png
 │   └── manifest.json
-└── writeup.md
+├── writeup.md
+├── writeup.html
+├── provenance.json
+└── verified-candidate.json  # READY/manual path에서만 생성
 ```
 
 중요 파일:
@@ -384,7 +405,8 @@ runs/<challenge-host>/<challenge-path>-<run-id>/
 | 파일 | 역할 |
 | --- | --- |
 | `solve.py` | 보존된 문제 파일에서 결과를 재현하는 최종 solver |
-| `writeup.md` | 실제 기록을 바탕으로 생성한 풀이 문서 |
+| `writeup.md`, `writeup.html` | 실제 기록을 바탕으로 생성한 풀이 문서 |
+| `provenance.json` | Write-up 입력과 생성 output hash |
 | `evidence/` | 문제·exploit·Accepted 증적과 무결성 manifest |
 | `state.db` | resume를 위한 상태, checkpoint, rejected candidate, submission attempt |
 | `events.jsonl` | 상태, 검증, 제출, 재현 event의 append-only 기록 |
@@ -406,18 +428,19 @@ cp .env.example .env
 | 변수 | 기본값 | 영향과 trade-off |
 | --- | --- | --- |
 | `CTF_RUNS_DIR` | `runs` | run/session root |
-| `CTF_REQUEST_TIMEOUT_SECONDS` | `20` | HTTP timeout 설정, 전체 adapter 연결은 planned |
+| `CTF_REQUEST_TIMEOUT_SECONDS` | `20` | scoped platform session에 사용하는 HTTP timeout |
 | `CTF_TOOL_TIMEOUT_SECONDS` | `30` | triage 도구와 solver replay timeout, browser/terminal capture는 별도 30초 기본값 사용 |
-| `CTF_RETRY_BUDGET` | `2` | 예약 설정, retry enforcement는 planned |
-| `CTF_SUBMISSION_BUDGET` | `3` | run당 durable 제출 시도 한도 |
-| `CTF_MAX_HYPOTHESES` | `3` | 설정상 cap, 기본 workflow는 현재 3개 가설 생성 |
+| `CTF_RETRY_BUDGET` | `2` | scoped platform session에 사용하는 HTTP retry budget |
+| `CTF_SUBMISSION_BUDGET` | `1` | run당 durable 제출 시도 한도 |
+| `CTF_MAX_HYPOTHESES` | `3` | planner cap. 최대 3개 가설만 schedule |
 | `CTF_MAX_STATE_STEPS` | `100` | 무한 재계획 loop 방지 |
 | `CTF_MAX_EXTRACTION_DEPTH` | `3` | archive recursion 한도 |
 | `CTF_MAX_EXTRACTED_BYTES` | `268435456` | 총 extraction 256 MiB 한도 |
-| `CTF_RATE_LIMIT_PER_SECOND` | `2` | 예약 설정, pacing enforcement는 planned |
+| `CTF_RATE_LIMIT_PER_SECOND` | `2` | scoped platform session에 사용하는 request pacing |
 | `CTF_BROWSER_STORAGE_STATE` | unset | Playwright storage-state 위치 |
 | `CTF_ALLOW_PRIVATE_HOSTS` | `false` | private/loopback target 허용, 허가된 lab에서만 사용 |
 | `CTF_ALLOW_LOCAL_REPRODUCTION` | `false` | Docker 대신 약한 host `python -I` 사용 |
+| `CTF_REDACT_FLAG` | `false` | 생성 Markdown, HTML, provenance에서 검증된 flag redaction |
 | `CTF_DOCKER_IMAGE` | `python:3.12-slim` | clean replay image |
 
 `.env`는 Git에서 제외됩니다. `.env.example`에는 실제 flag, cookie, password, API key를 넣지 마십시오.
@@ -438,9 +461,17 @@ cp .env.example .env
 | `CTF_MODEL_CALL_BUDGET` | `20` |
 | `CTF_MAX_MODEL_CONTEXT_BYTES` | `524288` |
 | `CTF_MAX_WORKERS` | `3` |
-| `CTF_ALLOW_STATIC_FALLBACK` | `true` |
+| `CTF_ALLOW_STATIC_FALLBACK` | `false` |
+| `CTF_TOTAL_RUN_TIMEOUT_SECONDS` | `3600` |
+| `CTF_WORKER_MAX_STEPS` | `12` |
+| `CTF_WORKER_MAX_COMMANDS` | `8` |
+| `CTF_WORKER_MAX_HTTP_REQUESTS` | `8` |
+| `CTF_WORKER_WALL_TIME_SECONDS` | `600` |
+| `CTF_WORKER_NO_PROGRESS_LIMIT` | `3` |
 
-설정은 중앙화되어 있지만 기본 deterministic workflow에는 아직 연결되지 않았습니다. model 기반 category solver와 cost report는 roadmap 항목입니다. 사용 가능한 model과 reasoning effort는 사용자 Codex 계정과 현재 Codex CLI 환경에 따라 달라집니다.
+Planner, solver, verifier model 이름은 사용자가 지정한 문자열 그대로 Codex CLI에 전달됩니다. 이 agent는 특정 계정에서 특정 model 또는 reasoning effort를 사용할 수 있다고 가정하지 않습니다. 일반적인 운용 정책은 어려운 web/pwn/rev lane에 보안 지향 model을, orchestration/triage/write-up 검토에는 일반 Codex model을 지정하는 것입니다. 자세한 내용은 [docs/model-routing.md](docs/model-routing.md)를 참고하십시오.
+
+Model worker는 model call 수, command report, wall-clock budget을 기록합니다. token/cost accounting은 backend 지원 여부에 따라 달라지며 이 release에서 보장하지 않습니다.
 
 Claude adapter는 테스트 stub입니다. 이 release에는 실제 Claude 인증/API 호출이 없습니다.
 
@@ -460,7 +491,7 @@ Claude adapter는 테스트 stub입니다. 이 release에는 실제 Claude 인�
 
 자동 제출 전에 대회가 AI, 자동 solver, 자동 flag 제출을 허용하는지 확인할 책임은 사용자에게 있습니다.
 
-[docs/security.md](docs/security.md)와 [docs/verification.md](docs/verification.md)를 함께 참고하십시오.
+[docs/security-model.md](docs/security-model.md), [docs/security.md](docs/security.md), [docs/verification.md](docs/verification.md)를 함께 참고하십시오.
 
 ## 문제 해결
 
@@ -500,7 +531,7 @@ Claude adapter는 테스트 stub입니다. 이 release에는 실제 Claude 인�
 ### CTFd가 아닌 플랫폼
 
 - 증상: 불완전한 generic 수집 또는 제출 불가
-- 해결: platform adapter를 구현해야 합니다. rCTF API 지원은 planned입니다.
+- 해결: auto-detection이 `rctf` 또는 `generic` 중 무엇을 선택했는지 확인합니다. rCTF는 experimental API adapter가 있으며, generic HTML은 내용과 attachment를 수집하지만 제출 endpoint를 추측하지 않습니다.
 
 ### Docker daemon 오류
 
@@ -580,13 +611,21 @@ ctf-agent benchmark evals/manifest.yaml
 ```
 
 ```yaml
+repeat_runs: 3
+timeout_seconds: 30
+total_budget_seconds: 300
 challenges:
   - id: local-retired-warmup
+    category: warmup
+    difficulty: retired
     command: [python3, fixtures/retired-warmup/solve.py]
     expected_flag: flag{retired_fixture_only}
+    clean_mode: local
 ```
 
-현재 runner는 solved count, elapsed seconds, Solved@15m/30m/60m, command fixture에서 0으로 고정된 Wrong count, exit code, 그리고 현재 command 성공률과 같은 `clean_reproduction_rate` 호환 필드를 보고합니다. 별도의 clean-environment replay를 수행하지는 않습니다. model/token cost, 독립 재현, repeat-run report는 planned입니다.
+현재 runner는 repeat run, challenge별 category/difficulty, run timeout, 전체 budget, hardcoded solver 거부, 선택적 local 또는 Docker clean replay, `benchmark-metrics.json` 또는 `events.jsonl` 기반 metric 수집을 지원합니다. solve rate, fixture command success, clean reproduction, Wrong submission, model/tool call, hallucinated-candidate rate, replay/independent verification rate, resume verification, write-up validation을 보고합니다.
+
+이 내용은 별도의 clean-environment replay를 수행하지는 않습니다라고 적힌 예전 README 설명을 대체합니다. 현재 runner는 `clean_replay`가 활성화되어 있으면 clean replay를 수행합니다. token과 금액 기준 cost report는 fixture나 event ledger가 제공한 metric으로 제한됩니다.
 
 ## Roadmap
 
@@ -598,14 +637,15 @@ challenges:
 - [x] crash-safe CTFd 제출과 verdict parsing
 - [x] evidence manifest, sanitizer, Write-up 생성
 - [x] fake/Mock CTFd E2E와 benchmark fixture
-- [ ] model 기반 Codex specialist를 기본 workflow에 연결
-- [ ] web, pwn, reverse, crypto, forensics production specialist
-- [ ] rCTF API/authentication/submission adapter
+- [x] model 기반 Codex planner와 통제된 solver worker를 기본 workflow에 연결
+- [x] experimental crypto, forensics/misc, static web specialist
+- [x] experimental rCTF API 인증, 수집, attachment, 제출, pending verdict 확인
+- [ ] production-grade pwn/rev deep exploit 지원
+- [ ] 다양한 live CTFd/rCTF version/theme 검증
 - [ ] 실제 플랫폼 compatibility matrix와 selector profile
 - [ ] remote-service fresh replay verification
 - [ ] production Claude backend
-- [ ] HTTP retry와 pacing 설정 enforcement
-- [ ] benchmark cost, tool-call, repeatability metric
+- [ ] backend가 제공하는 token/cost accounting을 benchmark report에 반영
 - [ ] native Windows 검증
 
 ## 기여
