@@ -86,7 +86,12 @@ Allowed worker actions are schema-validated:
 
 Each lane has limits for steps, model calls, commands, command timeout, wall-clock time, and no-progress streaks. Duplicate command fingerprints are skipped. Command stdout, stderr, metadata, exit code, timeout status, redaction status, and generated files are recorded as artifacts.
 
-Default commands are restricted to `python`, `python3`, `file`, `strings`, `exiftool`, `binwalk`, and `checksec`, then executed in Docker with `--network=none`, CPU/memory/PID limits, read-only root filesystem, and the original challenge files mounted read-only. Local command execution exists only for tests or the explicit weaker reproduction mode.
+Default commands are restricted to tools in the versioned
+`ctf-agent-codex-tools:0.1.0` image, including Python, file, binutils, ExifTool,
+binwalk, checksec, foremost, and tshark. Workers run non-root with
+`--network=none`, CPU/memory/PID limits, a read-only root filesystem, a writable
+lane mount, and original challenge files mounted read-only. Local execution exists
+only for tests or the explicit weaker reproduction mode.
 
 ## Specialist Order
 
@@ -116,7 +121,12 @@ independent_verified
 submission_allowed
 ```
 
-Replay success alone does not set `independent_verified`. `BlindVerifier` copies only the solver and preserved source artifacts into a clean temporary directory, runs without exposing the expected flag, rejects hardcoded solvers, and runs a negative control without source artifacts.
+Replay success alone does not set `independent_verified`. `BlindVerifier` copies
+only the solver and preserved source artifacts into a clean temporary directory,
+runs without exposing the expected flag, rejects hardcoded solvers, and records a
+separate `data_dependency_verified` negative control. A distinct Codex reviewer is
+required for `independent_verified`; static mode is submission-blocked unless the
+operator supplies explicit approval.
 
 Evidence generation records real files or explicit capture failures. It does not create fake PNGs when browser or terminal capture fails.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ import click
 from typer.main import get_command
 from typer.testing import CliRunner
 
+from ctf_agent import __version__
 from ctf_agent.cli import app
 from ctf_agent.config import Settings
 
@@ -117,6 +119,15 @@ def test_env_example_uses_real_settings_names() -> None:
         if line and not line.startswith("#") and "=" in line
     )
     assert active == setting_defaults
+
+
+def test_package_version_has_single_source() -> None:
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        project = tomllib.load(handle)
+
+    assert project["project"]["dynamic"] == ["version"]
+    assert project["tool"]["hatch"]["version"]["path"] == "src/ctf_agent/__init__.py"
+    assert __version__ == "0.1.0"
 
 
 def test_bilingual_readmes_keep_cli_config_and_limit_claims_in_sync() -> None:

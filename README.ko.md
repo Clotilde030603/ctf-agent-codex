@@ -36,13 +36,13 @@ ctf-agent solve "https://ctf.example.com/challenges/123" --auto-submit --writeup
 
 ## CTF Agent Codex란?
 
-명시적으로 허가된 CTF 대회, 퇴역 문제, 워게임, 실습 환경을 위한 로컬 Python 애플리케이션입니다. 사용자가 문제 URL 하나를 입력하면 결정론적 controller가 인증, 수집, artifact 분석, 가설 계획, solver 실행, 후보 검증, 선택적 자동 제출, 증적 생성, 최종 solver 재현을 순서대로 수행합니다.
+명시적으로 허가된 CTF 대회, 퇴역 문제, 워게임, 실습 환경을 위한 로컬 Python 애플리케이션입니다. 사용자가 문제 URL 하나를 입력하면 결정론적 controller가 인증, 수집, artifact 분석, 가설 계획, solver 실행, 후보 검증, 제출 전 clean reproduction, 선택적 자동 제출, 복구 가능한 증적·Write-up 생성을 순서대로 수행합니다.
 
-모델은 workflow 상태를 임의로 바꾸지 못합니다. 상태 전이는 Python이 통제합니다.
+모델은 workflow 상태를 임의로 바꾸지 못합니다. 상태 전이는 Python이 통제하며 resume은 DB의 검증된 비밀 제외 설정 snapshot을 먼저 복원합니다.
 
 ```text
 AUTHENTICATE -> INGEST -> TRIAGE -> PLAN -> SOLVE -> VERIFY
--> SUBMIT -> EVIDENCE -> WRITEUP -> REPRODUCE -> DONE
+-> REPRODUCE -> SUBMIT -> EVIDENCE_PENDING -> WRITEUP_PENDING -> DONE
 ```
 
 따라서 제출 결정, Wrong 처리, resume, 증적 생성 과정을 사후에 확인할 수 있습니다.
@@ -175,6 +175,16 @@ ctf-agent --help
 
 개발 dependency까지 설치하려면 `.[dev,browser]`를 사용합니다.
 
+checkout에서 격리된 CLI로 설치하려면 다음을 사용합니다.
+
+```bash
+pipx install .
+ctf-agent --help
+```
+
+Linux와 macOS를 CI/로컬 기준으로 지원합니다. Windows에서는 WSL2를 권장하며
+native Windows는 이 alpha에서 지원하지 않습니다.
+
 ## Codex 설정
 
 프로젝트에는 테스트된 비동기 Codex CLI backend가 있습니다. 기본 `CTF_BACKEND=codex`에서는 `ModelHypothesisPlanner`를 호출하고, deterministic preflight 결과를 context로 전달한 통제된 model-worker lane을 항상 실행하며, 제출 전에 별도의 blind verifier model 재도출을 요구합니다. 결정론적 경로만 사용하려면 `CTF_BACKEND=static`을 명시하십시오.
@@ -243,6 +253,8 @@ ctf-agent solve "https://ctf.example.com/challenges/123" \
 ctf-agent --help
 ctf-agent solve --help
 ctf-agent resume --help
+ctf-agent retry-evidence --help
+ctf-agent doctor --help
 ctf-agent benchmark --help
 ```
 
@@ -260,7 +272,9 @@ ctf-agent solve "<challenge-url>" \
   --planner-model "<planner-model>" \
   --solver-model "<solver-model>" \
   --reviewer-model "<reviewer-model>" \
-  --reasoning-effort high \
+  --planner-effort medium \
+  --solver-effort xhigh \
+  --reviewer-effort high \
   --max-workers 3 \
   --auto-submit \
   --writeup
@@ -314,6 +328,25 @@ ctf-agent solve "<challenge-url>" \
 
 이 옵션은 host에서 `python3 -I solve.py`를 실행하며 clean Docker reproduction과 동등하지 않습니다.
 
+원래 설정 snapshot을 복원하되 특정 역할만 override:
+
+```bash
+ctf-agent resume <run-id> --solver-model "<model>" --solver-effort xhigh
+```
+
+이미 Accepted인 run의 누락 증적을 재제출 없이 다시 캡처:
+
+```bash
+ctf-agent retry-evidence <run-id>
+```
+
+production 도구 이미지와 로컬 runtime 점검:
+
+```bash
+docker build -t ctf-agent-codex-tools:0.1.0 -f docker/ctf-tools/Dockerfile .
+ctf-agent doctor
+```
+
 현재 `status`, `--session`, `--no-submit` option은 없습니다. 제출하지 않는 실행에는 `--dry-run`을 사용하고, 로컬 기준은 `--help`를 따르십시오.
 
 ## 자동 플래그 검증과 제출
@@ -324,7 +357,7 @@ ctf-agent solve "<challenge-url>" \
 2. sample/placeholder 제거
 3. artifact, 위치, derivation, solver command provenance
 4. 새 프로세스에서 `solve.py` replay
-5. 독립 deterministic verifier 경로
+5. 데이터 의존성 negative control과 별도 blind reviewer model
 6. 과거 Wrong 후보 차단
 7. submission budget
 8. 외부 요청 전 durable pending-attempt 예약
@@ -343,7 +376,7 @@ Accepted 이후 다음 파일이 필요합니다.
 - `02-exploit-proof.html`: 민감정보를 정제한 terminal transcript
 - `manifest.json`: SHA-256, label, 생성 시각, source, redaction metadata
 
-브라우저는 전체 desktop이 아니라 문제 내용 영역을 캡처합니다. terminal renderer는 일반적인 cookie, bearer token, API key, CSRF token, password, session 값을 정제합니다. 플랫폼 증적 이미지가 없으면 허위 성공으로 처리하지 않고 evidence 단계가 실패합니다.
+브라우저는 전체 desktop이 아니라 문제 내용 영역을 캡처합니다. terminal renderer는 일반적인 cookie, bearer token, API key, CSRF token, password, session 값을 정제합니다. 개별 screenshot 실패는 성공한 증적을 보존하고 sanitized HTML/API verdict fallback과 manifest failure를 남깁니다. run은 `DONE_WITH_WARNINGS`로 끝날 수 있으며 `retry-evidence`로 다시 캡처할 수 있습니다.
 
 ## 자동 Write-up 생성
 
@@ -440,8 +473,9 @@ cp .env.example .env
 | `CTF_BROWSER_STORAGE_STATE` | unset | Playwright storage-state 위치 |
 | `CTF_ALLOW_PRIVATE_HOSTS` | `false` | private/loopback target 허용, 허가된 lab에서만 사용 |
 | `CTF_ALLOW_LOCAL_REPRODUCTION` | `false` | Docker 대신 약한 host `python -I` 사용 |
+| `CTF_APPROVE_STATIC_SUBMISSION` | `false` | static backend 자동 제출에 필요한 명시적 operator 승인 |
 | `CTF_REDACT_FLAG` | `false` | 생성 Markdown, HTML, provenance에서 검증된 flag redaction |
-| `CTF_DOCKER_IMAGE` | `python:3.12-slim` | clean replay image |
+| `CTF_DOCKER_IMAGE` | `ctf-agent-codex-tools:0.1.0` | worker와 clean replay용 versioned non-root image |
 
 `.env`는 Git에서 제외됩니다. `.env.example`에는 실제 flag, cookie, password, API key를 넣지 마십시오.
 
@@ -535,8 +569,8 @@ Claude adapter는 테스트 stub입니다. 이 release에는 실제 Claude 인�
 
 ### Docker daemon 오류
 
-- 확인: `docker version`, `docker run --rm python:3.12-slim python --version`
-- 해결: daemon을 시작하고 image pull 권한을 확인합니다. `--allow-local-reproduction`은 명시적인 약한 fallback입니다.
+- 확인: `ctf-agent doctor`를 실행합니다. Docker CLI만 있고 daemon이 꺼진 상태는 실패로 판정합니다.
+- 해결: daemon을 시작하고 `docker/ctf-tools/Dockerfile`을 빌드합니다. `--allow-local-reproduction`은 명시적인 약한 fallback입니다.
 
 ### CTF 도구 없음
 
@@ -618,12 +652,17 @@ challenges:
   - id: local-retired-warmup
     category: warmup
     difficulty: retired
+    source: self-authored
+    license: MIT
+    retired: true
+    authorized_for_benchmark: true
+    expected_solver_capability: deterministic-fixture
     command: [python3, fixtures/retired-warmup/solve.py]
     expected_flag: flag{retired_fixture_only}
     clean_mode: local
 ```
 
-현재 runner는 repeat run, challenge별 category/difficulty, run timeout, 전체 budget, hardcoded solver 거부, 선택적 local 또는 Docker clean replay를 지원합니다. 공식 aggregate metric은 scorer가 소유하며 command 실행과 clean replay에서만 계산합니다. Manifest가 fixture의 `benchmark-metrics.json` 또는 `events.jsonl` 수집을 선택할 수 있지만, 이 값은 `self_reported_metrics`로 별도 보존되며 공식 aggregate를 변경하지 않습니다.
+runner는 agent/version/commit/model identity를 기록하고 명시적으로 허가되지 않은 fixture를 거부하며 deterministic fixture와 model-solving fixture를 분리합니다. 공식 aggregate metric은 명시적 event, command 실행, clean replay에서 계산합니다. Fixture metric은 `self_reported_metrics`로 별도 보존되어 공식 aggregate를 변경하지 않습니다.
 
 이 내용은 별도의 clean-environment replay를 수행하지는 않습니다라고 적힌 예전 README 설명을 대체합니다. 현재 runner는 `clean_replay`가 활성화되어 있으면 clean replay를 수행합니다. token과 금액 기준 cost는 이 release의 authoritative benchmark metric이 아닙니다.
 

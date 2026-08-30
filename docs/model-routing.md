@@ -22,7 +22,10 @@ ctf-agent solve "<challenge-url>" \
   --max-workers 3
 ```
 
-`--reasoning-effort` applies the same effort to planner, solver, and verifier roles for that invocation. Use `.env` when each role needs a different effort value.
+`--reasoning-effort` remains a shorthand for all roles. `--planner-effort`,
+`--solver-effort`, and `--reviewer-effort` override it per role and are validated
+before execution. These values are persisted in the run snapshot and can be
+overridden explicitly by `resume`.
 
 ## Default Path
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ctf-agent-codex"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Deterministic, resumable Codex-powered CTF solving agent"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -33,6 +33,9 @@ ctf-agent = "ctf_agent.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ctf_agent"]
+
+[tool.hatch.version]
+path = "src/ctf_agent/__init__.py"
 
 [tool.pytest.ini_options]
 addopts = "-q"

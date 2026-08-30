@@ -1,5 +1,17 @@
 # Implementation Log
 
+## Operational hardening after 0.1.0 baseline
+
+- persisted versioned, credential-free runtime settings and resume override diffs;
+- moved clean reproduction before submission and added recoverable
+  `EVIDENCE_PENDING`, `WRITEUP_PENDING`, and `DONE_WITH_WARNINGS` states;
+- persisted exact verification fields with solver/source SHA-256 invalidation;
+- separated replay, data dependency, independent review, and submission approval;
+- added the non-root `ctf-agent-codex-tools:0.1.0` image and `ctf-agent doctor`;
+- expanded scoped structured HTTP actions and explicit worker/model/evidence events;
+- added comparison benchmark identity/authorization groups and stronger specialist harnesses;
+- expanded CI to Python 3.12/3.13, pipx, Docker tools, and Playwright screenshot smoke tests.
+
 Branch: `feat/autonomous-ctf-agent-v2`
 
 Each row records a tested logical milestone and the confirmed push result at the time it was completed.

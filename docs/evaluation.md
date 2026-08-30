@@ -22,6 +22,13 @@ challenges:
   - id: local-retired-warmup
     category: warmup
     difficulty: retired
+    source: self-authored
+    license: MIT
+    retired: true
+    authorized_for_benchmark: true
+    artifact_paths: [fixtures/retired-warmup/input.txt]
+    flag_policy: {pattern: 'flag\{[^{}]+\}'}
+    expected_solver_capability: deterministic-fixture
     command: [python3, fixtures/retired-warmup/solve.py]
     expected_flag: flag{retired_fixture_only}
     clean_mode: local
@@ -32,6 +39,9 @@ Per-challenge fields include:
 - `id`
 - `category`
 - `difficulty`
+- `source`, `license`, `retired`, `authorized_for_benchmark`
+- `challenge_url`, `artifact_paths`, `flag_policy`
+- `expected_solver_capability`
 - `command`
 - `expected_flag` or `expected_flag_sha256`
 - `repeat_runs`
@@ -45,6 +55,11 @@ Per-challenge fields include:
 - `clean_mode`
 - `replay_command`
 - `docker_image`
+
+The report includes agent name/version/commit/model/reasoning effort and separates
+`deterministic` from `model-solving` groups. Explicitly unauthorized fixtures are
+rejected. The bundled warmup is self-authored and deterministic with zero model
+calls; it is not evidence of difficult CTF solving performance.
 
 Benchmark commands must reference fixture scripts inside the fresh work directory. Inline interpreter execution and path traversal are rejected.
 
@@ -70,9 +85,12 @@ The JSON report includes:
 - tool call count;
 - hallucinated candidate rate;
 - median time to first candidate;
+- median time to verified candidate;
 - median time to Accepted;
 - replay verification rate;
 - independent verification rate;
+- data-dependency verification rate;
+- evidence completion rate;
 - resume verification rate;
 - write-up validation rate;
 - per-challenge repeat records.

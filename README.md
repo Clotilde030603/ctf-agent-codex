@@ -36,13 +36,13 @@ ctf-agent solve "https://ctf.example.com/challenges/123" --auto-submit --writeup
 
 ## What is CTF Agent Codex?
 
-CTF Agent Codex is a local Python application for authorized CTF competitions, retired challenges, war games, and training labs. You provide one challenge URL. A deterministic controller authenticates, downloads the challenge, analyzes preserved artifacts, plans independent hypotheses, runs solver lanes, verifies candidates, optionally submits an approved flag, captures evidence, and tests the final solver again.
+CTF Agent Codex is a local Python application for authorized CTF competitions, retired challenges, war games, and training labs. You provide one challenge URL. A deterministic controller authenticates, downloads the challenge, analyzes preserved artifacts, plans independent hypotheses, runs solver lanes, verifies candidates, cleanly reproduces the solver before submission, optionally submits an approved flag, and captures recoverable evidence and write-ups.
 
 The language model does **not** control workflow state. Python owns this fixed progression:
 
 ```text
 AUTHENTICATE -> INGEST -> TRIAGE -> PLAN -> SOLVE -> VERIFY
--> SUBMIT -> EVIDENCE -> WRITEUP -> REPRODUCE -> DONE
+-> REPRODUCE -> SUBMIT -> EVIDENCE_PENDING -> WRITEUP_PENDING -> DONE
 ```
 
 This separation makes submission decisions, retries, resume behavior, and evidence generation auditable.
@@ -175,6 +175,16 @@ ctf-agent --help
 
 For development dependencies, install `.[dev,browser]` instead.
 
+For an isolated CLI installation from a checkout:
+
+```bash
+pipx install .
+ctf-agent --help
+```
+
+Linux and macOS are covered by CI/local testing. WSL2 is the recommended Windows
+path; native Windows is not supported in this alpha.
+
 ## Codex Setup
 
 The project includes a tested asynchronous Codex CLI backend. With the default `CTF_BACKEND=codex`, the workflow calls `ModelHypothesisPlanner`, always runs controlled model-worker lanes with deterministic preflight results as context, and requires a separate blind verifier-model derivation before submission. Set `CTF_BACKEND=static` explicitly for the deterministic-only path.
@@ -243,6 +253,8 @@ Show the authoritative local command reference:
 ctf-agent --help
 ctf-agent solve --help
 ctf-agent resume --help
+ctf-agent retry-evidence --help
+ctf-agent doctor --help
 ctf-agent benchmark --help
 ```
 
@@ -260,7 +272,9 @@ ctf-agent solve "<challenge-url>" \
   --planner-model "<planner-model>" \
   --solver-model "<solver-model>" \
   --reviewer-model "<reviewer-model>" \
-  --reasoning-effort high \
+  --planner-effort medium \
+  --solver-effort xhigh \
+  --reviewer-effort high \
   --max-workers 3 \
   --auto-submit \
   --writeup
@@ -314,6 +328,25 @@ ctf-agent solve "<challenge-url>" \
 
 This opt-in runs `python3 -I solve.py` on the host. It is not equivalent to clean Docker reproduction.
 
+Resume with the original settings snapshot, overriding only one role when needed:
+
+```bash
+ctf-agent resume <run-id> --solver-model "<model>" --solver-effort xhigh
+```
+
+Retry missing screenshots for an already Accepted run without resubmitting:
+
+```bash
+ctf-agent retry-evidence <run-id>
+```
+
+Build and verify the production tool image and local runtime:
+
+```bash
+docker build -t ctf-agent-codex-tools:0.1.0 -f docker/ctf-tools/Dockerfile .
+ctf-agent doctor
+```
+
 There is currently no `status`, `--session`, or `--no-submit` option. Use `--dry-run` for a non-submitting run and `--help` as the local source of truth.
 
 ## Automatic Flag Verification and Submission
@@ -324,7 +357,7 @@ There is currently no `status`, `--session`, or `--no-submit` option. Use `--dry
 2. sample and placeholder rejection;
 3. artifact, location, derivation, and solver-command provenance checks;
 4. fresh-process `solve.py` replay;
-5. an independent deterministic verifier path;
+5. data-dependency negative control and a separate blind reviewer model;
 6. past Wrong-candidate rejection;
 7. the configured submission budget;
 8. a durable pending-attempt reservation before the external request.
@@ -343,7 +376,7 @@ After Accepted, the workflow requires:
 - `02-exploit-proof.html`: sanitized terminal transcript;
 - `manifest.json`: SHA-256 hashes, labels, timestamps, source, and redaction metadata.
 
-The browser captures the challenge content region, not the desktop. Terminal rendering redacts common cookies, bearer tokens, API keys, CSRF tokens, passwords, and session values. Missing platform screenshots fail the evidence stage rather than producing a false success.
+The browser captures the challenge content region, not the desktop. Terminal rendering redacts common cookies, bearer tokens, API keys, CSRF tokens, passwords, and session values. Each capture is retried independently; successes are preserved, failures enter the manifest, and sanitized challenge/verdict fallbacks are retained. The run can end at `DONE_WITH_WARNINGS` and later use `retry-evidence` without resubmission.
 
 ## Automatic Write-up Generation
 
@@ -357,7 +390,9 @@ A deterministic reviewer checks required headings, evidence hashes and existence
 ctf-agent resume <run-id>
 ```
 
-The controller loads `state.db` and continues from the last state. Completed work is checkpointed, while append-only events remain in `events.jsonl`.
+The controller restores the validated, credential-free settings snapshot from
+`state.db`, applies only explicit CLI overrides, and continues from the last state.
+Completed work is checkpointed, while append-only events remain in `events.jsonl`.
 
 Challenge URLs with credential-bearing query parameters are stored redacted. Re-supply the original URL in memory when resuming such a run:
 
@@ -440,8 +475,9 @@ cp .env.example .env
 | `CTF_BROWSER_STORAGE_STATE` | unset | Explicit Playwright storage-state location |
 | `CTF_ALLOW_PRIVATE_HOSTS` | `false` | Allows private/loopback targets; use only for authorized labs |
 | `CTF_ALLOW_LOCAL_REPRODUCTION` | `false` | Replaces Docker gate with weaker host `python -I` replay |
+| `CTF_APPROVE_STATIC_SUBMISSION` | `false` | Explicit operator approval required before static-backend auto-submit |
 | `CTF_REDACT_FLAG` | `false` | Redacts the verified flag in generated Markdown, HTML, and provenance |
-| `CTF_DOCKER_IMAGE` | `python:3.12-slim` | Image used for clean solver replay |
+| `CTF_DOCKER_IMAGE` | `ctf-agent-codex-tools:0.1.0` | Versioned non-root image used for workers and clean replay |
 
 The `.env` file is Git-ignored. Never put a real flag, cookie, password, or API key in `.env.example`.
 
@@ -537,8 +573,8 @@ See [docs/security-model.md](docs/security-model.md), [docs/security.md](docs/se
 
 ### Docker reproduction fails
 
-- Check: `docker version` and `docker run --rm python:3.12-slim python --version`
-- Fix: start the daemon and ensure the image can be pulled. `--allow-local-reproduction` is an explicit weaker fallback, not the default fix.
+- Check: `ctf-agent doctor` (it rejects a CLI-only installation with a stopped daemon).
+- Fix: start the daemon and build `docker/ctf-tools/Dockerfile`. `--allow-local-reproduction` is an explicit weaker fallback, not the default fix.
 
 ### An optional CTF tool is missing
 
@@ -622,12 +658,17 @@ challenges:
   - id: local-retired-warmup
     category: warmup
     difficulty: retired
+    source: self-authored
+    license: MIT
+    retired: true
+    authorized_for_benchmark: true
+    expected_solver_capability: deterministic-fixture
     command: [python3, fixtures/retired-warmup/solve.py]
     expected_flag: flag{retired_fixture_only}
     clean_mode: local
 ```
 
-The current runner supports repeat runs, per-challenge category and difficulty fields, per-run timeouts, an overall budget, hardcoded-solver rejection, and optional local or Docker clean replay. Official aggregate metrics are scorer-owned and derived from command execution and clean replay. A manifest may opt into fixture-written `benchmark-metrics.json` or `events.jsonl`, but those values are preserved separately as `self_reported_metrics` and never alter official aggregates.
+The runner records agent/version/commit/model identity, rejects explicitly unauthorized fixtures, and separates deterministic fixtures from model-solving fixtures. Official aggregate metrics are scorer-owned and derived from explicit events, command execution, and clean replay. Fixture-written metrics remain separate `self_reported_metrics` and never alter official aggregates.
 
 This supersedes older README text that said the runner does **not** perform a separate clean-environment replay; the current runner performs clean replay when `clean_replay` is enabled. Token and monetary cost are not authoritative benchmark metrics in this release.
 
