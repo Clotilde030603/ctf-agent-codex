@@ -34,6 +34,7 @@ from ctf_agent.specialists.deterministic import ArtifactSignalSpecialist
 from ctf_agent.specialists.forensics import ForensicsSpecialist
 from ctf_agent.specialists.model import BackendFactory, ModelSolverSpecialist
 from ctf_agent.specialists.web import StaticWebSpecialist
+from ctf_agent.state import StateStore, find_run_database
 from ctf_agent.triage import ScanConfig, classify_report, scan_path
 from ctf_agent.verification import (
     BlindVerifier,
@@ -90,6 +91,23 @@ class AutonomousWorkflow:
             RunState.WRITEUP: self.writeup,
             RunState.REPRODUCE: self.reproduce,
         }
+
+    @classmethod
+    def from_run(
+        cls,
+        runs_dir: Path,
+        run_id: str,
+        *,
+        overrides: dict[str, Any] | None = None,
+    ) -> AutonomousWorkflow:
+        database = find_run_database(runs_dir, run_id)
+        snapshot = StateStore(database).load_settings_snapshot(run_id)
+        settings = (
+            snapshot.restore(runs_dir=runs_dir, overrides=overrides)
+            if snapshot is not None
+            else Settings.model_validate({"runs_dir": runs_dir, **(overrides or {})})
+        )
+        return cls(settings)
 
     def controller(self) -> Controller:
         return Controller(self.settings, self.handlers)

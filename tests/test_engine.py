@@ -6,6 +6,7 @@ import pytest
 from ctf_agent.config import Settings
 from ctf_agent.engine import Controller, RunContext, StateOutcome
 from ctf_agent.schemas import RunState
+from ctf_agent.workflow import AutonomousWorkflow
 
 
 @pytest.mark.asyncio
@@ -133,3 +134,74 @@ async def test_resume_does_not_replay_state_if_event_append_crashes_after_commit
     resumed = controller.resume_run(context.record.run_id)
     assert resumed.record.state is RunState.INGEST
     assert calls == 1
+
+
+def test_workflow_resume_restores_snapshot_and_only_explicit_overrides(tmp_path: Path) -> None:
+    original = Settings(
+        runs_dir=tmp_path / "runs",
+        backend="codex",
+        planner_model="planner-a",
+        solver_model="solver-a",
+        verifier_model="reviewer-a",
+        planner_effort="low",
+        solver_effort="xhigh",
+        verifier_effort="medium",
+        model_call_budget=31,
+        worker_max_commands=13,
+        allow_private_hosts=True,
+        redact_flag=True,
+    )
+    workflow = AutonomousWorkflow(original)
+    context = workflow.controller().create_run(
+        "https://ctf.test/challenges/settings?token=do-not-store",
+        auto_submit=False,
+        writeup=True,
+    )
+
+    restored = AutonomousWorkflow.from_run(
+        original.runs_dir,
+        context.record.run_id,
+        overrides={"solver_model": "solver-b", "solver_effort": "ultra"},
+    )
+
+    assert restored.settings.planner_model == "planner-a"
+    assert restored.settings.solver_model == "solver-b"
+    assert restored.settings.verifier_model == "reviewer-a"
+    assert restored.settings.planner_effort == "low"
+    assert restored.settings.solver_effort == "ultra"
+    assert restored.settings.model_call_budget == 31
+    assert restored.settings.worker_max_commands == 13
+    assert restored.settings.allow_private_hosts is True
+    assert restored.settings.redact_flag is True
+    database_text = (context.record.run_dir / "state.db").read_bytes()
+    assert b"do-not-store" not in database_text
+
+    resumed = restored.controller().resume_run(
+        context.record.run_id,
+        challenge_url="https://ctf.test/challenges/settings?token=do-not-store",
+    )
+    resume_event = [
+        event
+        for event in resumed.ledger.list(context.record.run_id)
+        if event["event_type"] == "run.resumed"
+    ][-1]
+    overrides = resume_event["payload"]["settings"]["overrides"]
+    assert set(overrides) == {"solver_effort", "solver_model"}
+
+
+def test_invalid_settings_snapshot_fails_loudly(tmp_path: Path) -> None:
+    settings = Settings(runs_dir=tmp_path / "runs")
+    workflow = AutonomousWorkflow(settings)
+    context = workflow.controller().create_run(
+        "https://ctf.test/challenges/invalid-settings",
+        auto_submit=False,
+        writeup=False,
+    )
+    with context.store._connect() as connection:
+        connection.execute(
+            "UPDATE run_settings SET payload_json=? WHERE run_id=?",
+            ('{"schema_version":1,"backend":"invalid"}', context.record.run_id),
+        )
+
+    with pytest.raises(RuntimeError, match="invalid persisted run settings snapshot"):
+        AutonomousWorkflow.from_run(settings.runs_dir, context.record.run_id)

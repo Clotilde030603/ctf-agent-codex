@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 
+from pydantic import ValidationError
+
+from ctf_agent.config import RunSettingsSnapshot
 from ctf_agent.schemas import RunRecord, RunState
+
+SCHEMA_VERSION = 2
 
 FORWARD_TRANSITIONS: dict[RunState, set[RunState]] = {
     RunState.AUTHENTICATE: {RunState.INGEST, RunState.FAILED},
@@ -55,6 +61,11 @@ class StateStore:
 
     def _initialize(self) -> None:
         with self._connect() as connection:
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"state database schema {version} is newer than supported {SCHEMA_VERSION}"
+                )
             connection.execute(
                 """CREATE TABLE IF NOT EXISTS runs (
                     run_id TEXT PRIMARY KEY,
@@ -106,8 +117,21 @@ class StateStore:
                     updated_at TEXT NOT NULL
                 )"""
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS run_settings (
+                    run_id TEXT PRIMARY KEY,
+                    schema_version INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )"""
+            )
+            connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
-    def create(self, record: RunRecord) -> None:
+    def create(
+        self,
+        record: RunRecord,
+        settings_snapshot: RunSettingsSnapshot | None = None,
+    ) -> None:
         with self._connect() as connection:
             connection.execute(
                 "INSERT INTO runs VALUES(?,?,?,?,?,?,?,?,?)",
@@ -123,6 +147,34 @@ class StateStore:
                     record.last_error,
                 ),
             )
+            if settings_snapshot is not None:
+                connection.execute(
+                    "INSERT INTO run_settings VALUES(?,?,?,?)",
+                    (
+                        record.run_id,
+                        settings_snapshot.schema_version,
+                        settings_snapshot.model_dump_json(),
+                        datetime.now(UTC).isoformat(),
+                    ),
+                )
+
+    def load_settings_snapshot(self, run_id: str) -> RunSettingsSnapshot | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT schema_version,payload_json FROM run_settings WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        if int(row["schema_version"]) != 1:
+            raise RuntimeError(
+                f"unsupported run settings snapshot schema: {row['schema_version']}"
+            )
+        try:
+            payload = json.loads(str(row["payload_json"]))
+            return RunSettingsSnapshot.model_validate(payload)
+        except (json.JSONDecodeError, ValidationError) as exc:
+            raise RuntimeError(f"invalid persisted run settings snapshot: {exc}") from exc
 
     def load(self, run_id: str) -> RunRecord:
         with self._connect() as connection:
@@ -300,3 +352,16 @@ class StateStore:
                 (run_id, value),
             ).fetchone()
         return str(row["verdict"]) if row is not None else None
+
+
+def find_run_database(runs_dir: Path, run_id: str) -> Path:
+    candidates = list(runs_dir.glob(f"**/*{run_id}*/state.db"))
+    if not candidates:
+        candidates = list(runs_dir.glob("**/state.db"))
+    for database in candidates:
+        try:
+            StateStore(database).load(run_id)
+        except KeyError:
+            continue
+        return database
+    raise KeyError(f"run not found: {run_id}")

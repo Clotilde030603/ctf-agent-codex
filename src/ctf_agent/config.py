@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
 
 
 class Settings(BaseSettings):
@@ -17,9 +19,9 @@ class Settings(BaseSettings):
     planner_model: str = "gpt-5.6-sol"
     solver_model: str = "gpt-5.6-sol"
     verifier_model: str = "gpt-5.6-sol"
-    planner_effort: str = "high"
-    solver_effort: str = "xhigh"
-    verifier_effort: str = "high"
+    planner_effort: ReasoningEffort = "high"
+    solver_effort: ReasoningEffort = "xhigh"
+    verifier_effort: ReasoningEffort = "high"
     model_timeout_seconds: float = Field(default=180, gt=0, le=1800)
     model_call_budget: int = Field(default=20, ge=1, le=200)
     max_model_context_bytes: int = Field(default=512 * 1024, ge=4096)
@@ -46,3 +48,58 @@ class Settings(BaseSettings):
     allow_local_reproduction: bool = False
     redact_flag: bool = False
     docker_image: str = "python:3.12-slim"
+
+
+class RunSettingsSnapshot(BaseModel):
+    """Versioned, credential-free settings persisted with a run."""
+
+    schema_version: Literal[1] = 1
+    backend: Literal["codex", "static"]
+    planner_model: str
+    solver_model: str
+    verifier_model: str
+    planner_effort: ReasoningEffort
+    solver_effort: ReasoningEffort
+    verifier_effort: ReasoningEffort
+    model_timeout_seconds: float
+    model_call_budget: int
+    max_model_context_bytes: int
+    max_workers: int
+    allow_static_fallback: bool
+    total_run_timeout_seconds: float
+    worker_max_steps: int
+    worker_max_commands: int
+    worker_max_http_requests: int
+    worker_wall_time_seconds: float
+    worker_no_progress_limit: int
+    request_timeout_seconds: float
+    tool_timeout_seconds: float
+    retry_budget: int
+    submission_budget: int
+    max_hypotheses: int
+    max_state_steps: int
+    max_extraction_depth: int
+    max_extracted_bytes: int
+    rate_limit_per_second: float
+    codex_binary: str
+    browser_storage_state: str | None
+    allow_private_hosts: bool
+    allow_local_reproduction: bool
+    redact_flag: bool
+    docker_image: str
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> RunSettingsSnapshot:
+        payload = settings.model_dump(mode="json", exclude={"runs_dir"})
+        return cls.model_validate(payload)
+
+    def restore(
+        self,
+        *,
+        runs_dir: Path,
+        overrides: dict[str, Any] | None = None,
+    ) -> Settings:
+        payload = self.model_dump(exclude={"schema_version"})
+        payload["runs_dir"] = runs_dir
+        payload.update(overrides or {})
+        return Settings.model_validate(payload)

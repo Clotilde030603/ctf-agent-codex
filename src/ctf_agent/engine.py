@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from ctf_agent.config import Settings
+from ctf_agent.config import RunSettingsSnapshot, Settings
 from ctf_agent.events import EventLedger
 from ctf_agent.schemas import RunRecord, RunState
 from ctf_agent.security import redact_url
@@ -72,7 +72,7 @@ class Controller:
             auto_submit=auto_submit,
             writeup=writeup,
         )
-        store.create(record)
+        store.create(record, RunSettingsSnapshot.from_settings(self.settings))
         ledger = EventLedger(run_dir / "state.db", run_dir / "events.jsonl")
         ledger.append(
             run_id,
@@ -100,10 +100,28 @@ class Controller:
             except KeyError:
                 continue
             ledger = EventLedger(database, record.run_dir / "events.jsonl")
+            snapshot = store.load_settings_snapshot(run_id)
+            if snapshot is None:
+                settings_payload: dict[str, Any] = {
+                    "snapshot": "missing",
+                    "migration": "safe current defaults",
+                }
+            else:
+                restored = snapshot.restore(runs_dir=self.settings.runs_dir)
+                active_values = self.settings.model_dump(mode="json")
+                changed = {
+                    key: {"stored": stored, "active": active_values.get(key)}
+                    for key, stored in restored.model_dump(mode="json").items()
+                    if key != "runs_dir" and active_values.get(key) != stored
+                }
+                settings_payload = {
+                    "snapshot_schema_version": snapshot.schema_version,
+                    "overrides": changed,
+                }
             ledger.append(
                 run_id,
                 "run.resumed",
-                {"checkpoint": record.state.value},
+                {"checkpoint": record.state.value, "settings": settings_payload},
                 state=record.state.value,
             )
             if challenge_url is None and "REDACTED" in record.challenge_url:
