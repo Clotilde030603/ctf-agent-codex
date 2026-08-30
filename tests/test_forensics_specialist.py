@@ -138,9 +138,46 @@ def test_forensics_missing_optional_tools_is_fact_not_success(tmp_path: Path) ->
 
     assert result.status == "inconclusive"
     assert result.flag_candidates == []
-    assert "optional tool missing: exiftool" in result.facts
+    assert any("missing dependency: exiftool" in fact for fact in result.facts)
     assert result.next_action
     assert not (tmp_path / "solve.py").exists()
+
+
+def test_forensics_links_pcap_and_tshark_observation(tmp_path: Path) -> None:
+    pcap = tmp_path / "files" / "traffic.pcap"
+    pcap.parent.mkdir()
+    pcap.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 32)
+    stdout = tmp_path / "artifacts" / "tshark.stdout"
+    stdout.parent.mkdir()
+    stdout.write_text("eth -> ip -> tcp\n", encoding="utf-8")
+    triage = {
+        "files": [
+            {
+                "path": str(pcap),
+                "magic": "PCAP packet capture",
+                "strings": [],
+                "indicators": [],
+                "tool_results": [
+                    {
+                        "tool": "tshark",
+                        "missing": False,
+                        "exit_code": 0,
+                        "stdout_artifact": str(stdout),
+                    }
+                ],
+            }
+        ]
+    }
+
+    result = asyncio.run(
+        ForensicsSpecialist().solve(
+            _hypothesis(), {"run_dir": str(tmp_path), "triage": triage}
+        )
+    )
+
+    assert result.status == "inconclusive"
+    assert any("packet capture artifact detected" in fact for fact in result.facts)
+    assert any("tshark protocol hierarchy" in fact for fact in result.facts)
 
 
 def test_forensics_rejects_parent_traversal_artifact_path(tmp_path: Path) -> None:

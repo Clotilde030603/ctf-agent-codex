@@ -111,6 +111,52 @@ def test_crypto_recovers_single_byte_xor_hex(tmp_path: Path) -> None:
     assert raw.hex() not in solve_source
 
 
+def test_crypto_recovers_repeating_xor_and_caesar_substitution(tmp_path: Path) -> None:
+    key = b"ICE"
+    plaintext = b"flag{repeat_xor}"
+    repeated = bytes(value ^ key[index % len(key)] for index, value in enumerate(plaintext))
+    caesar = "synt{pnrfne_bx}"
+    source = tmp_path / "files" / "advanced.txt"
+    source.parent.mkdir()
+    source.write_text(f"{repeated.hex()}\n{caesar}\n", encoding="utf-8")
+    triage = {
+        "files": [
+            {
+                "path": str(source),
+                "strings": [
+                    {"value": repeated.hex(), "offset": 0},
+                    {"value": caesar, "offset": len(repeated.hex()) + 1},
+                ],
+                "indicators": [],
+            }
+        ]
+    }
+
+    result = asyncio.run(
+        CryptoSpecialist().solve(
+            _hypothesis(), {"run_dir": str(tmp_path), "triage": triage}
+        )
+    )
+
+    values = {candidate.value for candidate in result.flag_candidates}
+    assert "flag{repeat_xor}" in values
+    assert "flag{caesar_ok}" in values
+    assert any(
+        "repeating xor key" in step
+        for candidate in result.flag_candidates
+        for step in candidate.derivation
+    )
+    completed = subprocess.run(
+        ["python3", "solve.py"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert "flag{repeat_xor}" in completed.stdout
+    assert "flag{caesar_ok}" in completed.stdout
+
+
 def test_crypto_missing_signal_is_inconclusive_not_fake_success(tmp_path: Path) -> None:
     triage = {"files": [{"path": "notes.txt", "strings": [{"value": "nothing useful"}]}]}
 

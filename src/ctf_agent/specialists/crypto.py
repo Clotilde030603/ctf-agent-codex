@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import importlib.util
 import json
 import re
 import subprocess
@@ -28,6 +29,7 @@ class _CryptoHit:
     method: str
     token: str
     key: int | None = None
+    key_bytes: bytes | None = None
 
 
 class CryptoSpecialist:
@@ -45,7 +47,9 @@ class CryptoSpecialist:
         triage_data = triage if isinstance(triage, dict) else {}
         hits, path_facts = _recover_crypto_hits(triage_data, run_dir)
         facts = [
-            "checked triage strings for base64, hex, and single-byte XOR encodings",
+            "checked triage strings for base64, hex, Caesar substitution, "
+            "single-byte XOR, and known-prefix repeating XOR encodings",
+            *_crypto_dependency_facts(),
             *path_facts,
         ]
         if not hits:
@@ -122,6 +126,7 @@ def _recover_crypto_hits(
             offset = item.get("offset")
             location = f"offset {offset}" if isinstance(offset, int) else "string"
             hits.extend(_decode_tokens(value, source, location))
+            hits.extend(_decode_caesar(value, source, location))
     return hits, list(dict.fromkeys(facts))
 
 
@@ -178,7 +183,75 @@ def _decode_xor(token: str, source: str, location: str) -> list[_CryptoHit]:
         for key in range(256):
             decoded = bytes(byte ^ key for byte in raw)
             hits.extend(_flags_from_bytes(decoded, source, location, "single-byte-xor", token, key))
+        hits.extend(_decode_repeating_xor(raw, source, location, token))
     return hits
+
+
+def _decode_repeating_xor(
+    raw: bytes, source: str, location: str, token: str
+) -> list[_CryptoHit]:
+    hits: list[_CryptoHit] = []
+    for prefix in (b"flag{", b"ctf{"):
+        if len(raw) < len(prefix):
+            continue
+        for key_length in range(2, len(prefix) + 1):
+            key: list[int | None] = [None] * key_length
+            valid = True
+            for index, plain in enumerate(prefix):
+                derived = raw[index] ^ plain
+                slot = index % key_length
+                if key[slot] is not None and key[slot] != derived:
+                    valid = False
+                    break
+                key[slot] = derived
+            if not valid or any(value is None for value in key):
+                continue
+            key_bytes = bytes(value for value in key if value is not None)
+            decoded = bytes(
+                value ^ key_bytes[index % key_length]
+                for index, value in enumerate(raw)
+            )
+            for hit in _flags_from_bytes(
+                decoded, source, location, "known-prefix-repeating-xor", token
+            ):
+                hits.append(
+                    _CryptoHit(
+                        hit.flag,
+                        hit.source_artifact,
+                        hit.source_location,
+                        hit.method,
+                        hit.token,
+                        key_bytes=key_bytes,
+                    )
+                )
+    return hits
+
+
+def _decode_caesar(text: str, source: str, location: str) -> list[_CryptoHit]:
+    hits: list[_CryptoHit] = []
+    for shift in range(1, 26):
+        decoded = "".join(_shift_ascii_letter(char, -shift) for char in text)
+        for match in FLAG_RE.finditer(decoded):
+            if _is_low_risk_flag(match.group(0)):
+                hits.append(
+                    _CryptoHit(
+                        match.group(0),
+                        source,
+                        location,
+                        "caesar-substitution",
+                        text,
+                        key=shift,
+                    )
+                )
+    return hits
+
+
+def _shift_ascii_letter(char: str, shift: int) -> str:
+    if "a" <= char <= "z":
+        return chr((ord(char) - ord("a") + shift) % 26 + ord("a"))
+    if "A" <= char <= "Z":
+        return chr((ord(char) - ord("A") + shift) % 26 + ord("A"))
+    return char
 
 
 def _flags_from_bytes(
@@ -212,13 +285,31 @@ def _dedupe_hits(hits: list[_CryptoHit]) -> list[_CryptoHit]:
 def _derivation(hit: _CryptoHit) -> list[str]:
     steps = ["triage string token", hit.method]
     if hit.key is not None:
-        steps.append(f"xor key 0x{hit.key:02x}")
+        label = "Caesar shift" if hit.method == "caesar-substitution" else "xor key"
+        steps.append(f"{label} 0x{hit.key:02x}")
+    if hit.key_bytes is not None:
+        steps.append(f"repeating xor key {hit.key_bytes.hex()}")
     return steps
 
 
+def _crypto_dependency_facts() -> list[str]:
+    facts: list[str] = []
+    for module, label, install in (
+        ("Crypto", "PyCryptodome", "pip install pycryptodome"),
+        ("z3", "z3-solver", "pip install z3-solver"),
+    ):
+        if importlib.util.find_spec(module) is None:
+            facts.append(
+                f"missing dependency: {label}; install with `{install}`; "
+                "deterministic stdlib fallback remains available"
+            )
+        else:
+            facts.append(f"optional crypto dependency available: {label}")
+    return facts
+
+
 def _is_low_risk_flag(value: str) -> bool:
-    lowered = value.lower()
-    return lowered.startswith(("flag{", "ctf{"))
+    return bool(re.fullmatch(r"(?i)(?:flag|ctf)\{[A-Za-z0-9_.:-]{1,128}\}", value))
 
 
 def _write_solver(run_dir: Path, hits: list[_CryptoHit]) -> None:
@@ -274,6 +365,46 @@ def xor_candidates(token):
         for key in range(256):
             yield bytes(byte ^ key for byte in raw)
 
+def repeating_xor_candidates(token):
+    raw_values = []
+    hex_value = token[2:] if token.lower().startswith("0x") else token
+    if len(hex_value) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", hex_value):
+        raw_values.append(bytes.fromhex(hex_value))
+    decoded = decode_base64(token)
+    if decoded:
+        raw_values.append(decoded)
+    for raw in raw_values:
+        for prefix in (b"flag{{", b"ctf{{"):
+            if len(raw) < len(prefix):
+                continue
+            for key_length in range(2, len(prefix) + 1):
+                key = [None] * key_length
+                valid = True
+                for index, plain in enumerate(prefix):
+                    derived = raw[index] ^ plain
+                    slot = index % key_length
+                    if key[slot] is not None and key[slot] != derived:
+                        valid = False
+                        break
+                    key[slot] = derived
+                if valid and all(value is not None for value in key):
+                    key_bytes = bytes(key)
+                    yield bytes(
+                        value ^ key_bytes[index % key_length]
+                        for index, value in enumerate(raw)
+                    )
+
+def caesar_candidates(text):
+    for shift in range(1, 26):
+        decoded = []
+        for char in text:
+            if "a" <= char <= "z":
+                char = chr((ord(char) - ord("a") - shift) % 26 + ord("a"))
+            elif "A" <= char <= "Z":
+                char = chr((ord(char) - ord("A") - shift) % 26 + ord("A"))
+            decoded.append(char)
+        yield "".join(decoded)
+
 seen = set()
 for relative in SOURCES:
     path = Path(relative)
@@ -281,13 +412,19 @@ for relative in SOURCES:
         continue
     data = path.read_bytes()
     text = data.decode("utf-8", "ignore")
+    for decoded in caesar_candidates(text):
+        emit_flags(decoded, seen)
     for token in BASE64_TOKEN_RE.findall(text):
         emit_flags(decode_base64(token).decode("utf-8", "ignore"), seen)
         for decoded in xor_candidates(token):
             emit_flags(decoded.decode("utf-8", "ignore"), seen)
+        for decoded in repeating_xor_candidates(token):
+            emit_flags(decoded.decode("utf-8", "ignore"), seen)
     for token in HEX_TOKEN_RE.findall(text):
         emit_flags(decode_hex(token).decode("utf-8", "ignore"), seen)
         for decoded in xor_candidates(token):
+            emit_flags(decoded.decode("utf-8", "ignore"), seen)
+        for decoded in repeating_xor_candidates(token):
             emit_flags(decoded.decode("utf-8", "ignore"), seen)
 '''
     solve_path = run_dir / "solve.py"

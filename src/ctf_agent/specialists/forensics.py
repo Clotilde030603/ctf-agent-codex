@@ -113,6 +113,13 @@ def _recover_forensics_hits(
             facts.append(str(exc))
             continue
         magic = str(scanned.get("magic") or "")
+        if "pcap" in magic.lower() or source.lower().endswith((".pcap", ".pcapng")):
+            facts.append(f"packet capture artifact detected: {source}")
+            for tool_result in _dict_items(scanned.get("tool_results")):
+                if tool_result.get("tool") == "tshark" and not tool_result.get("missing"):
+                    facts.append(
+                        f"tshark protocol hierarchy output linked for packet capture: {source}"
+                    )
         if str(scanned.get("parent_archive") or ""):
             facts.append(f"nested extracted artifact present: {source}")
         hits.extend(_hits_from_indicators(scanned, source))
@@ -250,7 +257,17 @@ def _optional_tool_facts(triage_data: dict[str, object]) -> list[str]:
     for scanned in _dict_items(triage_data.get("files")):
         for result in _dict_items(scanned.get("tool_results")):
             if result.get("missing") is True:
-                facts.append(f"optional tool missing: {result.get('tool')}")
+                tool = str(result.get("tool") or "unknown")
+                install = {
+                    "tshark": "install Wireshark/tshark or use the versioned CTF tool image",
+                    "foremost": "install foremost or use the versioned CTF tool image",
+                    "binwalk": "install binwalk or use the versioned CTF tool image",
+                    "exiftool": "install ExifTool or use the versioned CTF tool image",
+                }.get(tool, "install the tool in the CTF worker image")
+                facts.append(
+                    f"missing dependency: {tool}; {install}; "
+                    "stdlib/string-analysis fallback remains available"
+                )
     return list(dict.fromkeys(facts))
 
 

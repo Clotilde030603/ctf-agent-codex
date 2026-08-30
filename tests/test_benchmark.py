@@ -195,6 +195,68 @@ def test_event_metrics_require_explicit_success_and_completed_resume() -> None:
     assert explicit["total_run_status"] == "DONE"
 
 
+def test_comparison_manifest_reports_identity_authorization_and_execution_group(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "input.txt").write_text("comparison_ok\n", encoding="utf-8")
+    (tmp_path / "solve.py").write_text(
+        "from pathlib import Path\n"
+        "print('flag{' + Path('input.txt').read_text().strip() + '}')\n",
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        """agent:
+  name: ctf-agent-codex
+  version: 0.1.0
+  commit: test-commit
+  model: fixture-model
+  reasoning_effort: low
+challenges:
+  - id: comparison
+    category: misc
+    difficulty: local
+    source: self-authored
+    license: MIT
+    retired: true
+    authorized_for_benchmark: true
+    artifact_paths: [input.txt]
+    flag_policy: {pattern: 'flag\\{[^{}]+\\}'}
+    repeat: 2
+    expected_solver_capability: model-assisted
+    command: [python3, solve.py]
+    expected_flag: flag{comparison_ok}
+    clean_replay: false
+""",
+        encoding="utf-8",
+    )
+
+    result = benchmark(manifest)
+
+    assert result["agent"]["commit"] == "test-commit"
+    assert result["agent"]["model"] == "fixture-model"
+    assert result["challenges"][0]["repeat_runs"] == 2
+    assert result["challenges"][0]["execution_group"] == "model-solving"
+    assert result["group_summaries"][0]["group"] == "model-solving"
+
+
+def test_comparison_manifest_rejects_unauthorized_fixture(tmp_path: Path) -> None:
+    (tmp_path / "solve.py").write_text("print('flag{x}')\n", encoding="utf-8")
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        """challenges:
+  - id: unauthorized
+    authorized_for_benchmark: false
+    command: [python3, solve.py]
+    expected_flag: flag{x}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="not authorized"):
+        benchmark(manifest)
+
+
 def test_benchmark_rejects_raw_expected_flag_in_solver_source(tmp_path: Path) -> None:
     solver = tmp_path / "solve.py"
     solver.write_text("print('flag{do_not_embed}')\n", encoding="utf-8")

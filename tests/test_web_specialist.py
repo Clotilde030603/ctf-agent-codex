@@ -89,3 +89,24 @@ def test_static_web_specialist_reports_missing_capability_without_fake_success(
     assert result.reproduction_command == ""
     assert any("route POST /login" in fact for fact in result.facts)
     assert any("missing capability" in fact for fact in result.facts)
+
+
+def test_static_web_extracts_js_endpoints_graphql_and_websocket_urls(
+    tmp_path: Path,
+) -> None:
+    files = tmp_path / "files"
+    files.mkdir()
+    (files / "client.js").write_text(
+        "fetch('/api/items');\n"
+        "const q = `query LoadItems { items { id } }`;\n"
+        "const ws = new WebSocket('wss://challenge.test/socket');\n",
+        encoding="utf-8",
+    )
+
+    result = asyncio.run(
+        StaticWebSpecialist().solve(hypothesis(), {"run_dir": str(tmp_path)})
+    )
+
+    assert any("client endpoint /api/items" in fact for fact in result.facts)
+    assert any("GraphQL query LoadItems" in fact for fact in result.facts)
+    assert any("WebSocket URL wss://challenge.test/socket" in fact for fact in result.facts)

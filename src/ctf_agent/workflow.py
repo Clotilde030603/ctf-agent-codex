@@ -37,6 +37,7 @@ from ctf_agent.specialists.crypto import CryptoSpecialist
 from ctf_agent.specialists.deterministic import ArtifactSignalSpecialist
 from ctf_agent.specialists.forensics import ForensicsSpecialist
 from ctf_agent.specialists.model import BackendFactory, ModelSolverSpecialist
+from ctf_agent.specialists.toolchain import PWN_PROFILE, REV_PROFILE, ToolchainSpecialist
 from ctf_agent.specialists.web import StaticWebSpecialist
 from ctf_agent.state import StateStore, find_run_database
 from ctf_agent.triage import ScanConfig, classify_report, scan_path
@@ -1299,6 +1300,10 @@ class AutonomousWorkflow:
             return ForensicsSpecialist()
         if primary == "web":
             return StaticWebSpecialist()
+        if primary == "rev":
+            return ToolchainSpecialist(REV_PROFILE)
+        if primary == "pwn":
+            return ToolchainSpecialist(PWN_PROFILE)
         return None
 
     @staticmethod

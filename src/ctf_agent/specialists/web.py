@@ -75,6 +75,15 @@ AUTH_RE = re.compile(
     re.I,
 )
 CSRF_RE = re.compile(r"\b(csrf|xsrf|csrf_token|x-csrf-token|x-xsrf-token)\b", re.I)
+CLIENT_ENDPOINT_RE = re.compile(
+    r"\b(?:fetch|axios\.(?:get|post|put|patch|delete)|WebSocket)\s*\(\s*"
+    r"['\"](?P<endpoint>(?:https?|wss?)?://[^'\"]+|/[^'\"]*)['\"]",
+    re.I,
+)
+GRAPHQL_OPERATION_RE = re.compile(
+    r"\b(?P<kind>query|mutation|subscription)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
+)
+WEBSOCKET_URL_RE = re.compile(r"\bwss?://[^\s'\"`<>]+", re.I)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +120,7 @@ class StaticWebSpecialist:
             facts.extend(_route_facts(source))
             facts.extend(_parameter_facts(source))
             facts.extend(_trust_boundary_facts(source))
+            facts.extend(_client_api_facts(source))
 
         candidates = _flag_candidates(files)
         artifacts: list[str] = []
@@ -247,6 +257,25 @@ def _trust_boundary_facts(source: SourceFile) -> list[str]:
             facts.append(
                 f"{source.relative}:{line_number} client endpoint uses "
                 f"{method_match.group(1).upper()}"
+            )
+    return facts
+
+
+def _client_api_facts(source: SourceFile) -> list[str]:
+    facts: list[str] = []
+    for line_number, line in enumerate(source.lines, start=1):
+        for match in CLIENT_ENDPOINT_RE.finditer(line):
+            facts.append(
+                f"{source.relative}:{line_number} client endpoint {match.group('endpoint')}"
+            )
+        for match in GRAPHQL_OPERATION_RE.finditer(line):
+            facts.append(
+                f"{source.relative}:{line_number} GraphQL "
+                f"{match.group('kind')} {match.group('name')}"
+            )
+        for match in WEBSOCKET_URL_RE.finditer(line):
+            facts.append(
+                f"{source.relative}:{line_number} WebSocket URL {match.group(0)}"
             )
     return facts
 

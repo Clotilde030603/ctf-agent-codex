@@ -19,7 +19,7 @@ from .tool_runner import run_tool
 from .types import ExtractionRecord, ScannedFile, ToolRunResult, TriageReport, path_to_text
 
 ARCHIVE_SUFFIXES = {".zip", ".jar", ".apk", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".tbz2", ".txz"}
-DEFAULT_TOOLS = ("file", "strings", "exiftool", "binwalk", "checksec")
+DEFAULT_TOOLS = ("file", "strings", "exiftool", "binwalk", "checksec", "tshark")
 
 
 @dataclass(slots=True)
@@ -188,6 +188,8 @@ def _detect_magic(data: bytes) -> str:
         return "JPEG image"
     if data.startswith(b"%PDF"):
         return "PDF document"
+    if data.startswith((b"\xd4\xc3\xb2\xa1", b"\xa1\xb2\xc3\xd4", b"\x0a\x0d\x0d\x0a")):
+        return "PCAP packet capture"
     if data.startswith(b"\x1f\x8b"):
         return "gzip compressed data"
     if data[:265].endswith(b"ustar"):
@@ -212,6 +214,8 @@ def _detect_mime(path: Path, magic: str) -> str:
         return "application/zip"
     if "pdf" in lowered:
         return "application/pdf"
+    if "pcap" in lowered:
+        return "application/vnd.tcpdump.pcap"
     if "png" in lowered:
         return "image/png"
     if "jpeg" in lowered:
@@ -314,6 +318,15 @@ def _run_default_tools(
     }
     if "elf" in magic.lower():
         tool_map["checksec"] = ["checksec", "--file", path_to_text(path)]
+    if "pcap" in magic.lower() or path.suffix.lower() in {".pcap", ".pcapng"}:
+        tool_map["tshark"] = [
+            "tshark",
+            "-r",
+            path_to_text(path),
+            "-q",
+            "-z",
+            "io,phs",
+        ]
     for tool in config.external_tools:
         command = tool_map.get(tool)
         if command is None:

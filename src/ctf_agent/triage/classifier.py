@@ -96,7 +96,7 @@ def classify_report(report: TriageReport) -> ClassificationResult:
         if scanned.entropy >= 7.5 and scanned.size > 256:
             add("forensics", "high-entropy artifact detected", scanned.path, 0.8)
 
-    for tool in ("file", "strings", "exiftool", "binwalk", "checksec"):
+    for tool in ("file", "strings", "exiftool", "binwalk", "checksec", "tshark"):
         if any(
             result.tool == tool and result.missing
             for scanned in report.files

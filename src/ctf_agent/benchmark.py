@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from ctf_agent import __version__
 from ctf_agent.config import DEFAULT_CTF_TOOL_IMAGE
 
 
@@ -51,6 +52,15 @@ class BenchmarkChallenge(BaseModel):
     expected_flag_sha256: str | None = None
     category: str = "misc"
     difficulty: str = "unknown"
+    source: str = "local"
+    license: str = "unknown"
+    retired: bool | None = None
+    authorized_for_benchmark: bool | None = None
+    challenge_url: str | None = None
+    artifact_paths: list[str] = Field(default_factory=list)
+    flag_policy: dict[str, Any] = Field(default_factory=dict)
+    expected_solver_capability: str = "deterministic"
+    repeat: int | None = Field(default=None, ge=1)
     repeat_runs: int | None = Field(default=None, ge=1)
     timeout_seconds: float | None = Field(default=None, gt=0)
     total_budget_seconds: float | None = Field(default=None, gt=0)
@@ -75,10 +85,28 @@ class BenchmarkChallenge(BaseModel):
     def expected_flag_source_required(self) -> BenchmarkChallenge:
         if self.expected_flag is None and self.expected_flag_sha256 is None:
             raise ValueError("expected_flag or expected_flag_sha256 is required")
+        if self.authorized_for_benchmark is False:
+            raise ValueError("benchmark challenge is not authorized for benchmark use")
+        if self.repeat is not None and self.repeat_runs is None:
+            self.repeat_runs = self.repeat
         return self
+
+    @property
+    def execution_group(self) -> str:
+        capability = self.expected_solver_capability.casefold()
+        return "model-solving" if "model" in capability else "deterministic"
+
+
+class BenchmarkAgentIdentity(BaseModel):
+    name: str = "ctf-agent-codex"
+    version: str = __version__
+    commit: str = "unknown"
+    model: str | None = None
+    reasoning_effort: str | None = None
 
 
 class BenchmarkManifest(BaseModel):
+    agent: BenchmarkAgentIdentity = Field(default_factory=BenchmarkAgentIdentity)
     challenges: list[BenchmarkChallenge] = Field(default_factory=list)
     repeat_runs: int = Field(default=3, ge=1)
     timeout_seconds: float = Field(default=60, gt=0)
@@ -121,6 +149,7 @@ class BenchmarkChallengeRecord(BaseModel):
     id: str
     category: str
     difficulty: str
+    execution_group: str
     repeat_runs: int
     solved: bool
     fixture_command_success_rate: float | None
@@ -142,6 +171,7 @@ class BenchmarkChallengeRecord(BaseModel):
 
 
 class BenchmarkReport(BaseModel):
+    agent: BenchmarkAgentIdentity
     manifest: str
     challenge_count: int
     run_count: int
@@ -162,6 +192,7 @@ class BenchmarkReport(BaseModel):
     hallucinated_candidate_rate: float | None
     results: list[dict[str, Any]]
     challenges: list[BenchmarkChallengeRecord]
+    group_summaries: list[dict[str, Any]]
 
 
 def _load_manifest(path: Path) -> BenchmarkManifest:
@@ -197,6 +228,7 @@ async def run_benchmark(manifest: Path) -> dict[str, Any]:
     ]
 
     report = BenchmarkReport(
+        agent=config.agent,
         manifest=str(manifest),
         challenge_count=len(challenge_records),
         run_count=len(runs),
@@ -217,6 +249,7 @@ async def run_benchmark(manifest: Path) -> dict[str, Any]:
         hallucinated_candidate_rate=_candidate_hallucination_rate(runs),
         results=[_legacy_result(item) for item in challenge_records],
         challenges=challenge_records,
+        group_summaries=_group_summaries(challenge_records),
     )
     return report.model_dump(mode="json")
 
@@ -258,6 +291,7 @@ async def _run_challenge(
         id=challenge.id,
         category=challenge.category,
         difficulty=challenge.difficulty,
+        execution_group=challenge.execution_group,
         repeat_runs=len(runs),
         solved=bool(runs) and all(run.solved for run in runs),
         fixture_command_success_rate=_rate([run.fixture_command_success for run in runs]),
@@ -817,6 +851,26 @@ def _legacy_result(challenge: BenchmarkChallengeRecord) -> dict[str, Any]:
         "stderr": first_run.command.stderr if first_run and first_run.command else "",
         "error": first_run.error if first_run else "not run",
     }
+
+
+def _group_summaries(
+    challenges: list[BenchmarkChallengeRecord],
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[BenchmarkChallengeRecord]] = {}
+    for challenge in challenges:
+        groups.setdefault(challenge.execution_group, []).append(challenge)
+    return [
+        {
+            "group": name,
+            "challenge_count": len(items),
+            "solved_count": sum(item.solved for item in items),
+            "solve_rate": _rate([item.solved for item in items]),
+            "wrong_submissions": sum(item.wrong_submissions for item in items),
+            "model_calls": sum(item.model_calls for item in items),
+            "tool_calls": sum(item.tool_calls for item in items),
+        }
+        for name, items in sorted(groups.items())
+    ]
 
 
 def _rate(values: Iterable[bool | None]) -> float | None:

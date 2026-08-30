@@ -153,6 +153,8 @@ class CommandPolicy(BaseModel):
             "exiftool",
             "binwalk",
             "checksec",
+            "objdump",
+            "readelf",
         }
     )
     docker_image: str = DEFAULT_CTF_TOOL_IMAGE

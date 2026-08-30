@@ -1,10 +1,22 @@
 repeat_runs: 3
 timeout_seconds: 30
 total_budget_seconds: 300
+agent:
+  name: ctf-agent-codex
+  version: 0.1.0
+  commit: local
 challenges:
   - id: local-retired-warmup
     category: warmup
     difficulty: retired
+    source: self-authored
+    license: MIT
+    retired: true
+    authorized_for_benchmark: true
+    artifact_paths: [fixtures/retired-warmup/input.txt]
+    flag_policy:
+      pattern: 'flag\{[^{}]+\}'
+    expected_solver_capability: deterministic-fixture
     command: [python3, fixtures/retired-warmup/solve.py]
     expected_flag: flag{retired_fixture_only}
     clean_mode: local

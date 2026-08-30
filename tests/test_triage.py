@@ -122,3 +122,17 @@ def test_scan_file_metadata_hash_magic_mime_and_language(tmp_path: Path) -> None
     assert scanned.magic == "ASCII text"
     assert scanned.language == "python"
     assert any(indicator.value == "CTF{from_source}" for indicator in scanned.indicators)
+
+
+def test_scan_detects_pcap_magic_and_mime(tmp_path: Path) -> None:
+    capture = tmp_path / "traffic.pcap"
+    capture.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 64)
+
+    report = scan_path(
+        capture,
+        tmp_path / "artifacts",
+        ScanConfig(run_external_tools=False),
+    )
+
+    assert report.files[0].magic == "PCAP packet capture"
+    assert report.files[0].mime == "application/vnd.tcpdump.pcap"
