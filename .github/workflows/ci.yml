@@ -58,11 +58,13 @@ jobs:
         run: |
           python -m pip install pipx
           pipx install . --force
-          "$HOME/.local/bin/ctf-agent" --help
-          "$HOME/.local/bin/ctf-agent" solve --help
-          "$HOME/.local/bin/ctf-agent" resume --help
-          "$HOME/.local/bin/ctf-agent" retry-evidence --help
-          "$HOME/.local/bin/ctf-agent" doctor --help
+          PIPX_VENVS="$(pipx environment --value PIPX_LOCAL_VENVS)"
+          PIPX_CLI="$PIPX_VENVS/ctf-agent-codex/bin/ctf-agent"
+          "$PIPX_CLI" --help
+          "$PIPX_CLI" solve --help
+          "$PIPX_CLI" resume --help
+          "$PIPX_CLI" retry-evidence --help
+          "$PIPX_CLI" doctor --help
 
   ctf-tool-image:
     runs-on: ubuntu-latest
