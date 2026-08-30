@@ -7,6 +7,8 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from ctf_agent.config import DEFAULT_CTF_TOOL_IMAGE
+
 
 @dataclass(frozen=True, slots=True)
 class ReplayResult:
@@ -21,7 +23,7 @@ async def reproduce_solver(
     run_dir: Path,
     expected_flag: str,
     *,
-    image: str = "python:3.12-slim",
+    image: str = DEFAULT_CTF_TOOL_IMAGE,
     timeout_seconds: float = 120,
     use_docker: bool = True,
 ) -> ReplayResult:
@@ -38,6 +40,7 @@ async def reproduce_solver(
             "--cpus=1",
             "--memory=512m",
             "--pids-limit=128",
+            "--user=10001:10001",
             "--read-only",
             "--tmpfs=/tmp:rw,noexec,nosuid,size=64m",
             f"--mount=type=bind,src={run_dir.resolve()},dst=/work,readonly",

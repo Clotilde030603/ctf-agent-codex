@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any, Literal
 import httpx
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from ctf_agent.config import DEFAULT_CTF_TOOL_IMAGE
 from ctf_agent.evidence.sanitizer import SecretSanitizer
 from ctf_agent.ingestion.session import ScopedAsyncSession
 from ctf_agent.models.base import ModelBackend, ModelBackendError, ModelRequest
@@ -127,7 +129,7 @@ class CommandPolicy(BaseModel):
             "checksec",
         }
     )
-    docker_image: str = "python:3.12-slim"
+    docker_image: str = DEFAULT_CTF_TOOL_IMAGE
     docker_binary: str = "docker"
     cpus: str = "1"
     memory: str = "512m"
@@ -657,6 +659,7 @@ class WorkerCore:
             f"--cpus={self.policy.cpus}",
             f"--memory={self.policy.memory}",
             f"--pids-limit={self.policy.pids_limit}",
+            f"--user={_container_user()}",
             "--read-only",
             "--tmpfs=/tmp:rw,noexec,nosuid,size=64m",
             f"--mount=type=bind,src={self.workspace.root},dst=/work",
@@ -694,6 +697,16 @@ class WorkerCore:
 def command_fingerprint(argv: Sequence[str]) -> str:
     payload = json.dumps(list(argv), ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _container_user() -> str:
+    if os.name != "posix":
+        return "10001:10001"
+    uid = os.getuid()
+    gid = os.getgid()
+    if uid == 0:
+        return "10001:10001"
+    return f"{uid}:{gid}"
 
 
 def _truncate(value: bytes, limit: int) -> bytes:

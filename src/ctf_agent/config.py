@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+DEFAULT_CTF_TOOL_IMAGE = "ctf-agent-codex-tools:0.1.0"
 
 
 class Settings(BaseSettings):
@@ -48,7 +49,7 @@ class Settings(BaseSettings):
     allow_local_reproduction: bool = False
     approve_static_submission: bool = False
     redact_flag: bool = False
-    docker_image: str = "python:3.12-slim"
+    docker_image: str = DEFAULT_CTF_TOOL_IMAGE
 
 
 class RunSettingsSnapshot(BaseModel):

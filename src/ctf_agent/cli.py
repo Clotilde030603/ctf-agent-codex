@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from ctf_agent.benchmark import benchmark as run_benchmark
 from ctf_agent.config import Settings
+from ctf_agent.doctor import run_doctor
 from ctf_agent.workflow import AutonomousWorkflow
 
 app = typer.Typer(no_args_is_help=True, help="Deterministic autonomous CTF agent")
@@ -236,6 +237,28 @@ def benchmark_command(
 ) -> None:
     """Run an offline benchmark manifest."""
     typer.echo(json.dumps(run_benchmark(manifest), indent=2, sort_keys=True))
+
+
+@app.command()
+def doctor(
+    runs_dir: Annotated[Path, typer.Option("--runs-dir")] = Path("runs"),
+    backend: Annotated[str | None, typer.Option("--backend")] = None,
+    docker_image: Annotated[str | None, typer.Option("--docker-image")] = None,
+) -> None:
+    """Check runtime, authentication, Docker daemon, tools, and browser readiness."""
+    defaults = Settings()
+    settings = _validated_settings(
+        {
+            **defaults.model_dump(),
+            "runs_dir": runs_dir,
+            "backend": backend or defaults.backend,
+            "docker_image": docker_image or defaults.docker_image,
+        }
+    )
+    report = run_doctor(settings)
+    typer.echo(json.dumps(report.model_dump(mode="json") | {"ok": report.ok}, indent=2))
+    if not report.ok:
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

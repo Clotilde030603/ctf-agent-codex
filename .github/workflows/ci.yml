@@ -5,13 +5,16 @@ on:
   pull_request:
 
 jobs:
-  docs-config:
+  package:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - name: Validate TOML configuration
         run: |
           python - <<'PY'
@@ -50,3 +53,50 @@ jobs:
           else
             echo "pyproject.toml not present yet; skipped package checks."
           fi
+
+  ctf-tool-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build versioned CTF tool image
+        run: docker build -t ctf-agent-codex-tools:0.1.0 -f docker/ctf-tools/Dockerfile .
+      - name: Verify non-root tool availability and isolation flags
+        run: |
+          test "$(docker image inspect ctf-agent-codex-tools:0.1.0 --format '{{.Config.User}}')" = "10001:10001"
+          docker run --rm \
+            --network=none \
+            --read-only \
+            --pids-limit=64 \
+            --memory=256m \
+            --cpus=1 \
+            --tmpfs=/tmp:rw,noexec,nosuid,size=16m \
+            ctf-agent-codex-tools:0.1.0 \
+            sh -c 'test "$(id -u)" != 0 && for tool in python3 file strings objdump readelf exiftool binwalk checksec foremost tshark; do command -v "$tool"; done'
+      - name: Record installed tool versions
+        run: |
+          docker run --rm --network=none ctf-agent-codex-tools:0.1.0 sh -c \
+            'python3 --version; file --version | head -1; exiftool -ver; binwalk --help | head -1; checksec --version || true; tshark --version | head -1'
+
+  playwright-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package and Chromium
+        run: |
+          python -m pip install -e ".[browser]"
+          playwright install --with-deps chromium
+      - name: Render a real terminal screenshot
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+          from ctf_agent.evidence import TerminalRenderer
+
+          with TemporaryDirectory() as directory:
+              result = TerminalRenderer().render("flag{ci_screenshot}\n", Path(directory))
+              assert result.png_path is not None and result.png_path.is_file()
+              assert result.png_path.stat().st_size > 0
+          PY

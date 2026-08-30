@@ -122,6 +122,7 @@ def test_default_docker_command_wrapper_mounts_challenge_readonly(tmp_path: Path
 
     assert command[:4] == ["docker", "run", "--rm", "--network=none"]
     assert "--read-only" in command
+    assert any(item.startswith("--user=") for item in command)
     assert "--tmpfs=/tmp:rw,noexec,nosuid,size=64m" in command
     assert f"--mount=type=bind,src={workspace.root},dst=/work" in command
     assert f"--mount=type=bind,src={challenge.resolve()},dst=/challenge,readonly" in command

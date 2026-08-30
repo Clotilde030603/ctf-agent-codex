@@ -22,6 +22,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from ctf_agent.config import DEFAULT_CTF_TOOL_IMAGE
+
 
 class BenchmarkMetrics(BaseModel):
     wrong_submissions: int = Field(default=0, ge=0)
@@ -55,7 +57,7 @@ class BenchmarkChallenge(BaseModel):
     clean_replay: bool = True
     clean_mode: Literal["local", "docker"] = "local"
     replay_command: list[str] | None = None
-    docker_image: str = "python:3.12-slim"
+    docker_image: str = DEFAULT_CTF_TOOL_IMAGE
 
     @field_validator("command", "replay_command")
     @classmethod
