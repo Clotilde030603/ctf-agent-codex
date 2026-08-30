@@ -896,7 +896,9 @@ class AutonomousWorkflow:
             failures.setdefault("challenge-screenshot", "screenshot was not created")
 
         replay = context.values.get("replay")
-        transcript = getattr(replay, "stdout", "") or self._candidate(context).value
+        transcript = getattr(replay, "stdout", "") or self._candidate(
+            context, allow_legacy_accepted=True
+        ).value
         terminal_html = evidence_dir / "02-exploit-proof.html"
         proof_image = evidence_dir / "02-exploit-proof.png"
         terminal = None
@@ -997,7 +999,8 @@ class AutonomousWorkflow:
         if not verdict_image.is_file():
             fallback = evidence_dir / "03-verdict-fallback.json"
             verdict = context.store.latest_submission_verdict(
-                context.record.run_id, self._candidate(context).value
+                context.record.run_id,
+                self._candidate(context, allow_legacy_accepted=True).value,
             )
             sanitized = sanitizer.sanitize(
                 json.dumps(
@@ -1030,7 +1033,7 @@ class AutonomousWorkflow:
                 {"label": label, "reason": reason},
                 state=context.record.state.value,
             )
-        flag = self._candidate(context).value
+        flag = self._candidate(context, allow_legacy_accepted=True).value
         manifest.add_event("VERIFY", "candidate independently replayed", flag=flag)
         manifest.add_event("SUBMIT", "platform accepted candidate", flag=flag, accepted=True)
         manifest.save(evidence_dir / "manifest.json")
@@ -1140,14 +1143,26 @@ class AutonomousWorkflow:
         context.values["specialist_results"] = results
         return results
 
-    def _candidate(self, context: RunContext) -> FlagCandidate:
+    def _candidate(
+        self,
+        context: RunContext,
+        *,
+        allow_legacy_accepted: bool = False,
+    ) -> FlagCandidate:
         record = context.store.load_verified_candidate(context.record.run_id)
         if record is not None:
             if not record.valid:
-                raise RuntimeError(
-                    "verified candidate was invalidated: "
-                    + (record.invalidation_reason or "unknown reason")
+                legacy_evidence_only = (
+                    allow_legacy_accepted
+                    and record.invalidation_reason
+                    == "legacy verification has no original integrity hashes"
+                    and context.store.has_accepted_submission(context.record.run_id)
                 )
+                if not legacy_evidence_only:
+                    raise RuntimeError(
+                        "verified candidate was invalidated: "
+                        + (record.invalidation_reason or "unknown reason")
+                    )
             solver = context.record.run_dir / "solve.py"
             source = context.record.run_dir / record.source_artifact
             mismatch = None
@@ -1211,8 +1226,19 @@ class AutonomousWorkflow:
                         solver_sha256=_sha256_file(context.record.run_dir / "solve.py"),
                         source_artifact=str(source.relative_to(context.record.run_dir)),
                         source_artifact_sha256=_sha256_file(source),
+                        valid=False,
+                        invalidation_reason=(
+                            "legacy verification has no original integrity hashes"
+                        ),
                     )
                     context.store.save_verified_candidate(migrated)
+                    if not (
+                        allow_legacy_accepted
+                        and context.store.has_accepted_submission(context.record.run_id)
+                    ):
+                        raise RuntimeError(
+                            "legacy verification requires fresh hash-backed re-verification"
+                        )
                     context.values["candidate"] = verified
                     return verified
         raise RuntimeError("verified candidate is absent from specialist artifacts")

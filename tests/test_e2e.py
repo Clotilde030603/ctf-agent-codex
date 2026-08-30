@@ -610,3 +610,67 @@ async def test_submission_recomputes_gate_from_individual_verification_fields(
 
     with pytest.raises(RuntimeError, match="data_dependency_verified"):
         await workflow.submit(context)
+
+
+def test_legacy_verification_requires_reverification_unless_already_accepted(
+    tmp_path: Path,
+) -> None:
+    workflow = AutonomousWorkflow(
+        Settings(backend="static", runs_dir=tmp_path / "runs"),
+        FakeCTFdAdapter(),
+    )
+    context = workflow.controller().create_run(
+        "https://ctf.test/challenges/legacy-verification",
+        auto_submit=True,
+        writeup=True,
+    )
+    candidate = FlagCandidate(
+        value="flag{legacy}",
+        source_artifact="files/payload.txt",
+        source_location="line 1",
+        solver_command="python3 solve.py",
+    )
+    source = context.record.run_dir / candidate.source_artifact
+    source.write_text(candidate.value + "\n", encoding="utf-8")
+    (context.record.run_dir / "solve.py").write_text(
+        "from pathlib import Path\nprint(Path('files/payload.txt').read_text())\n",
+        encoding="utf-8",
+    )
+    (context.record.run_dir / "artifacts" / "specialist-results.json").write_text(
+        json.dumps(
+            [
+                SpecialistResult(
+                    hypothesis_id="legacy",
+                    status="confirmed",
+                    flag_candidates=[candidate],
+                ).model_dump(mode="json")
+            ]
+        ),
+        encoding="utf-8",
+    )
+    context.ledger.append(
+        context.record.run_id,
+        "flag.verified",
+        {
+            "flag": candidate.value,
+            "format_match": True,
+            "provenance_verified": True,
+            "replay_verified": True,
+            "independent_verified": True,
+        },
+        state=RunState.VERIFY.value,
+    )
+
+    with pytest.raises(RuntimeError, match="requires fresh hash-backed re-verification"):
+        workflow._candidate(context)
+
+    context.store.record_submission(
+        context.record.run_id,
+        candidate.value,
+        SubmissionVerdict.ACCEPTED.value,
+    )
+    restored = workflow._candidate(context, allow_legacy_accepted=True)
+
+    assert restored.value == candidate.value
+    record = context.store.load_verified_candidate(context.record.run_id)
+    assert record is not None and record.valid is False

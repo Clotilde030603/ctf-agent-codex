@@ -42,6 +42,9 @@ With `backend=static`, `independent_verified` remains false.
 The durable candidate record stores every boolean separately plus the solver and
 source-artifact SHA-256. Resume restores those exact values and invalidates the
 record if either file changes.
+Legacy runs created before integrity hashes existed are marked as requiring fresh
+verification and cannot be newly submitted. A durable pre-existing Accepted verdict
+may still use the legacy candidate strictly for evidence recovery.
 
 The full model-reviewed path sets:
 
