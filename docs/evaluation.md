@@ -77,7 +77,7 @@ The JSON report includes:
 - write-up validation rate;
 - per-challenge repeat records.
 
-Metrics are derived from command success, clean replay, optional `benchmark-metrics.json`, and optional `events.jsonl`. Token and monetary cost are available only if the fixture or event ledger records enough data.
+Official metrics are derived only from scorer-owned command execution and clean replay observations. When `metrics_source: self_reported` is set, optional `benchmark-metrics.json` or `events.jsonl` values are stored separately under `self_reported_metrics`; they do not contribute to aggregate counts or rates. Token and monetary cost are therefore not authoritative benchmark metrics in this release.
 
 ## Fixtures
 

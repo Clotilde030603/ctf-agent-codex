@@ -6,6 +6,8 @@ import json
 import time
 from pathlib import Path
 
+import pytest
+
 from ctf_agent.benchmark import benchmark
 
 
@@ -262,6 +264,45 @@ def test_hash_only_benchmark_rejects_embedded_flag_literal(tmp_path: Path) -> No
 challenges:
   - id: hash-hardcoded
     command: [python3, solve.py]
+    expected_flag_sha256: {hashlib.sha256(expected.encode()).hexdigest()}
+    clean_replay: false
+""",
+        encoding="utf-8",
+    )
+
+    result = benchmark(manifest)
+
+    run = result["challenges"][0]["runs"][0]
+    assert run["hardcoded_rejected"] is True
+    assert "matching expected flag hash" in run["error"]
+
+
+@pytest.mark.parametrize(
+    ("command", "filename", "source"),
+    [
+        (["sh", "solve.sh"], "solve.sh", "printf '%s\\n' 'flag{shell_embedded}'\n"),
+        (
+            ["node", "solve.js"],
+            "solve.js",
+            "console.log('flag{' + 'javascript_embedded}')\n",
+        ),
+    ],
+)
+def test_hash_only_benchmark_rejects_non_python_literals(
+    tmp_path: Path, command: list[str], filename: str, source: str
+) -> None:
+    expected = (
+        "flag{shell_embedded}"
+        if filename.endswith(".sh")
+        else "flag{javascript_embedded}"
+    )
+    (tmp_path / filename).write_text(source, encoding="utf-8")
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        f"""repeat_runs: 1
+challenges:
+  - id: hash-hardcoded-non-python
+    command: {json.dumps(command)}
     expected_flag_sha256: {hashlib.sha256(expected.encode()).hexdigest()}
     clean_replay: false
 """,

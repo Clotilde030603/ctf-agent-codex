@@ -623,9 +623,9 @@ challenges:
     clean_mode: local
 ```
 
-현재 runner는 repeat run, challenge별 category/difficulty, run timeout, 전체 budget, hardcoded solver 거부, 선택적 local 또는 Docker clean replay, `benchmark-metrics.json` 또는 `events.jsonl` 기반 metric 수집을 지원합니다. solve rate, fixture command success, clean reproduction, Wrong submission, model/tool call, hallucinated-candidate rate, replay/independent verification rate, resume verification, write-up validation을 보고합니다.
+현재 runner는 repeat run, challenge별 category/difficulty, run timeout, 전체 budget, hardcoded solver 거부, 선택적 local 또는 Docker clean replay를 지원합니다. 공식 aggregate metric은 scorer가 소유하며 command 실행과 clean replay에서만 계산합니다. Manifest가 fixture의 `benchmark-metrics.json` 또는 `events.jsonl` 수집을 선택할 수 있지만, 이 값은 `self_reported_metrics`로 별도 보존되며 공식 aggregate를 변경하지 않습니다.
 
-이 내용은 별도의 clean-environment replay를 수행하지는 않습니다라고 적힌 예전 README 설명을 대체합니다. 현재 runner는 `clean_replay`가 활성화되어 있으면 clean replay를 수행합니다. token과 금액 기준 cost report는 fixture나 event ledger가 제공한 metric으로 제한됩니다.
+이 내용은 별도의 clean-environment replay를 수행하지는 않습니다라고 적힌 예전 README 설명을 대체합니다. 현재 runner는 `clean_replay`가 활성화되어 있으면 clean replay를 수행합니다. token과 금액 기준 cost는 이 release의 authoritative benchmark metric이 아닙니다.
 
 ## Roadmap
 

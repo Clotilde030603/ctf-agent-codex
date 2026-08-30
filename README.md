@@ -627,9 +627,9 @@ challenges:
     clean_mode: local
 ```
 
-The current runner supports repeat runs, per-challenge category and difficulty fields, per-run timeouts, an overall budget, hardcoded-solver rejection, optional local or Docker clean replay, and metrics derived from `benchmark-metrics.json` or `events.jsonl`. It reports solve rate, fixture command success, clean reproduction, Wrong submissions, model/tool calls, hallucinated-candidate rate, replay and independent verification rates, resume verification, and write-up validation.
+The current runner supports repeat runs, per-challenge category and difficulty fields, per-run timeouts, an overall budget, hardcoded-solver rejection, and optional local or Docker clean replay. Official aggregate metrics are scorer-owned and derived from command execution and clean replay. A manifest may opt into fixture-written `benchmark-metrics.json` or `events.jsonl`, but those values are preserved separately as `self_reported_metrics` and never alter official aggregates.
 
-This supersedes older README text that said the runner does **not** perform a separate clean-environment replay; the current runner performs clean replay when `clean_replay` is enabled. Token and monetary cost reporting are still limited to metrics supplied by the fixture or event ledger.
+This supersedes older README text that said the runner does **not** perform a separate clean-environment replay; the current runner performs clean replay when `clean_replay` is enabled. Token and monetary cost are not authoritative benchmark metrics in this release.
 
 ## Roadmap
 

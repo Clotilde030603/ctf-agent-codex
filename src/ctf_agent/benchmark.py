@@ -9,6 +9,7 @@ import binascii
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import statistics
@@ -534,7 +535,9 @@ def _hash_only_hardcoded_reason(
             text = source.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        constants = _python_constant_strings(text) if source.suffix == ".py" else set()
+        constants = _generic_source_strings(text)
+        if source.suffix == ".py":
+            constants.update(_python_constant_strings(text))
         for constant in constants:
             for value in _constant_variants(constant):
                 if hashlib.sha256(value).hexdigest() == expected_hash:
@@ -543,6 +546,44 @@ def _hash_only_hardcoded_reason(
                         f"{_relative_label(source, run_dir)}"
                     )
     return None
+
+
+def _generic_source_strings(text: str) -> set[str]:
+    """Extract plain, encoded, and simple concatenated literals across script types."""
+    values = set(
+        re.findall(r"[A-Za-z0-9_]{1,64}\{[^\r\n{}]{1,256}\}", text)
+    )
+    literal_pattern = re.compile(
+        r"(?P<quote>['\"`])(?P<body>(?:\\.|(?!(?P=quote)).)*)(?P=quote)",
+        re.DOTALL,
+    )
+    matches = list(literal_pattern.finditer(text))
+    decoded: list[str] = []
+    for match in matches:
+        body = match.group("body")
+        value = body
+        if match.group("quote") != "`":
+            try:
+                parsed = ast.literal_eval(match.group(0))
+            except (SyntaxError, ValueError):
+                parsed = body
+            if isinstance(parsed, str):
+                value = parsed
+        values.add(value)
+        decoded.append(value)
+
+    for index, value in enumerate(decoded[:-1]):
+        combined = value
+        previous = matches[index]
+        for next_index in range(index + 1, len(matches)):
+            current = matches[next_index]
+            separator = text[previous.end() : current.start()]
+            if not re.fullmatch(r"[ \t]*(?:[+.][ \t\r\n]*)?", separator):
+                break
+            combined += decoded[next_index]
+            values.add(combined)
+            previous = current
+    return values
 
 
 def _constant_variants(value: str) -> set[bytes]:
