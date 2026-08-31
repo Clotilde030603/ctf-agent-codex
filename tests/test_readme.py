@@ -28,7 +28,6 @@ def test_bilingual_readmes_have_user_guide_sections_and_valid_local_links() -> N
             "## First-Time Authentication",
             "## Quick Start",
             "## Troubleshooting",
-            "## Contributing",
             "## Disclaimer",
         ),
         "README.ko.md": (
@@ -41,7 +40,6 @@ def test_bilingual_readmes_have_user_guide_sections_and_valid_local_links() -> N
             "## 최초 CTF 플랫폼 인증",
             "## Quick Start",
             "## 문제 해결",
-            "## 기여",
             "## 면책 고지",
         ),
     }

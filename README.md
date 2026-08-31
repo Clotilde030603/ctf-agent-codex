@@ -58,13 +58,6 @@ flowchart LR
     K --> L[DONE or DONE_WITH_WARNINGS]
 ```
 
-The normal state path is:
-
-```text
-AUTHENTICATE -> INGEST -> TRIAGE -> PLAN -> SOLVE -> VERIFY
--> REPRODUCE -> SUBMIT -> EVIDENCE_PENDING -> WRITEUP_PENDING -> DONE
-```
-
 ## Current Project Status
 
 This repository is an **alpha-quality, executable vertical slice**. The complete
@@ -256,27 +249,13 @@ auto-submission is blocked unless the operator explicitly uses
 
 ## Automatic Flag Verification and Submission
 
-A flag-looking string is never enough for automatic submission. The workflow keeps
-these decisions separate:
+A flag-looking string is never enough for automatic submission. The agent checks its
+format and source, replays the solver, rejects hardcoded output, verifies that the
+result depends on the original artifact, and uses a separate blind reviewer in Codex
+mode. Clean Docker reproduction happens before submission.
 
-```text
-format_match
-provenance_verified
-replay_verified
-data_dependency_verified
-independent_verified
-submission_allowed
-```
-
-The solver is replayed without an expected flag, checked for hardcoded output, and
-run without source artifacts as a negative control. In Codex mode, a separate
-reviewer receives the original inputs and solver but not the expected candidate.
-The reviewer must return matching source provenance, a location, evidence, and a
-reproduction command.
-
-Clean Docker reproduction happens before submission. The submission layer recomputes
-the gate, rejects past Wrong candidates, reserves a durable pending attempt, and
-refuses blind duplicate retries after timeouts or rate limits.
+The submission layer rejects past Wrong candidates, reserves a durable attempt, and
+does not blindly retry the same value after a timeout or rate limit.
 
 ## Supported Platforms
 
@@ -301,30 +280,10 @@ status. They are never silently treated as success.
 
 ## Output Directory
 
-```text
-runs/<host>/<challenge>-<run-id>/
-├── state.db
-├── events.jsonl
-├── challenge.json
-├── triage.json
-├── hypotheses.json
-├── files/
-├── artifacts/
-│   ├── lanes/
-│   └── specialist-results.json
-├── solve.py
-├── requirements.txt
-├── verified-candidate.json      # dry-run/manual review only
-├── evidence/
-│   ├── 01-challenge.png
-│   ├── 02-exploit-proof.html
-│   ├── 02-exploit-proof.png
-│   ├── 03-accepted.png
-│   └── manifest.json
-├── writeup.md
-├── writeup.html
-└── provenance.json
-```
+The run directory under `runs/` contains the generated `solve.py`, original and
+generated artifacts, `events.jsonl`, evidence screenshots and manifest,
+`writeup.md`, `writeup.html`, and `provenance.json`. A dry run also writes
+`verified-candidate.json` for manual review.
 
 If a screenshot fails, successful captures are preserved and sanitized fallback
 evidence is recorded. The run may finish as `DONE_WITH_WARNINGS` and retry only the
@@ -403,52 +362,14 @@ Wrong verdict, or an exhausted budget.
 Pass the same `--runs-dir` used for the original solve. If the stored URL contains
 `REDACTED`, also pass the original `--challenge-url`.
 
-## Benchmarking
+## More Documentation
 
-```bash
-ctf-agent benchmark evals/manifest.yaml
-```
-
-The manifest records fixture source, license, retirement and authorization status,
-agent/model identity, expected capability, repeats, and budgets. Reports keep
-deterministic and model-solving groups separate and expose command, HTTP, model,
-candidate, verification, evidence, Wrong, timing, and final-state metrics.
-
-The bundled warmup is a self-authored deterministic fixture with zero model calls.
-Do not interpret its success rate as difficult CTF performance. See
-[docs/evaluation.md](docs/evaluation.md) to add legally redistributable fixtures.
-
-## Documentation
-
-- [Architecture](docs/architecture.md)
 - [State machine and recovery](docs/state-machine.md)
 - [Security model](docs/security-model.md)
 - [Model routing](docs/model-routing.md)
 - [Verification](docs/verification.md)
 - [Docker tool image](docs/docker-tools.md)
 - [Benchmarking](docs/evaluation.md)
-- [Alpha release checklist](docs/alpha-release-checklist.md)
-- [Changelog](CHANGELOG.md)
-
-## Development
-
-```bash
-python -m pip install -e ".[dev,browser]"
-pytest
-ruff check .
-mypy --strict src
-python -m compileall -q src tests evals
-```
-
-Tests and bundled fixtures use fake, retired, or self-authored data. Do not add live
-credentials, active private flags, copyrighted challenge packages without permission,
-or platform session state.
-
-## Contributing
-
-Keep changes small, tested, and honest about maturity. Preserve target scope,
-submission gates, state-machine invariants, evidence redaction, and backward-compatible
-migrations. New README commands must match the real CLI.
 
 ## License
 

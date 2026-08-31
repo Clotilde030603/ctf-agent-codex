@@ -58,13 +58,6 @@ flowchart LR
     K --> L[DONE 또는 DONE_WITH_WARNINGS]
 ```
 
-일반 상태 흐름:
-
-```text
-AUTHENTICATE -> INGEST -> TRIAGE -> PLAN -> SOLVE -> VERIFY
--> REPRODUCE -> SUBMIT -> EVIDENCE_PENDING -> WRITEUP_PENDING -> DONE
-```
-
 ## 현재 프로젝트 상태
 
 현재 저장소는 **실행 가능한 alpha vertical slice**입니다. Controller 전체 흐름,
@@ -253,25 +246,12 @@ ctf-agent solve "<challenge-url>" \
 
 ## 자동 플래그 검증과 제출
 
-Flag처럼 보이는 문자열만으로는 자동 제출하지 않습니다. 다음 상태를 서로
-독립적으로 관리합니다.
+Flag처럼 보이는 문자열만으로는 자동 제출하지 않습니다. Format과 출처를 확인하고,
+solver를 replay하고, hardcode를 거부하고, 결과가 원본 artifact에 의존하는지 검사하며,
+Codex mode에서는 별도 blind reviewer를 사용합니다. Clean Docker reproduction은
+제출 전에 수행됩니다.
 
-```text
-format_match
-provenance_verified
-replay_verified
-data_dependency_verified
-independent_verified
-submission_allowed
-```
-
-Solver는 expected flag 없이 replay되고 hardcode 여부를 검사하며, source artifact
-없이 실행하는 negative control을 거칩니다. Codex mode에서는 별도 reviewer가
-expected candidate를 받지 않고 원본 입력과 solver만 검토합니다. Reviewer는
-일치하는 source provenance, 위치, evidence, reproduction command를 반환해야 합니다.
-
-Clean Docker reproduction은 제출 전에 수행됩니다. 제출 단계는 gate를 다시 계산하고,
-과거 Wrong 후보를 차단하고, durable pending attempt를 먼저 예약하며, timeout이나
+제출 단계는 과거 Wrong 후보를 차단하고 durable attempt를 먼저 예약하며, timeout이나
 rate limit 뒤에 동일 값을 무조건 재제출하지 않습니다.
 
 ## 지원 플랫폼
@@ -297,30 +277,10 @@ rate limit 뒤에 동일 값을 무조건 재제출하지 않습니다.
 
 ## 출력 디렉터리
 
-```text
-runs/<host>/<challenge>-<run-id>/
-├── state.db
-├── events.jsonl
-├── challenge.json
-├── triage.json
-├── hypotheses.json
-├── files/
-├── artifacts/
-│   ├── lanes/
-│   └── specialist-results.json
-├── solve.py
-├── requirements.txt
-├── verified-candidate.json      # dry-run/manual review 전용
-├── evidence/
-│   ├── 01-challenge.png
-│   ├── 02-exploit-proof.html
-│   ├── 02-exploit-proof.png
-│   ├── 03-accepted.png
-│   └── manifest.json
-├── writeup.md
-├── writeup.html
-└── provenance.json
-```
+`runs/` 아래의 실행 디렉터리에는 생성된 `solve.py`, 원본과 생성 artifact,
+`events.jsonl`, 증적 screenshot과 manifest, `writeup.md`, `writeup.html`,
+`provenance.json`이 저장됩니다. Dry run은 수동 검토용
+`verified-candidate.json`도 생성합니다.
 
 Screenshot이 실패하면 성공한 capture는 보존하고 sanitized fallback 증적을 기록합니다.
 Run은 `DONE_WITH_WARNINGS`로 끝날 수 있으며 이후 누락된 증적만 다시 시도할 수 있습니다.
@@ -397,51 +357,14 @@ reviewer 불일치, integrity hash 변경, 과거 Wrong, budget 소진입니다.
 최초 실행과 같은 `--runs-dir`을 지정합니다. 저장된 URL에 `REDACTED`가 있다면
 원본 `--challenge-url`도 전달합니다.
 
-## Benchmark
+## 추가 문서
 
-```bash
-ctf-agent benchmark evals/manifest.yaml
-```
-
-Manifest는 fixture source, license, retired/authorization 상태, agent/model identity,
-expected capability, repeat, budget을 기록합니다. Report는 deterministic과
-model-solving group을 분리하고 command, HTTP, model, candidate, verification,
-evidence, Wrong, timing, final-state metric을 제공합니다.
-
-포함된 warmup은 model call이 0인 자체 제작 deterministic fixture입니다. 성공률을
-고난도 CTF 성능으로 해석하지 마십시오. 합법적으로 재배포 가능한 fixture 추가 방법은
-[docs/evaluation.md](docs/evaluation.md)을 참고하십시오.
-
-## 문서
-
-- [Architecture](docs/architecture.md)
 - [상태 머신과 복구](docs/state-machine.md)
 - [Security model](docs/security-model.md)
 - [Model routing](docs/model-routing.md)
 - [Verification](docs/verification.md)
 - [Docker tool image](docs/docker-tools.md)
 - [Benchmark](docs/evaluation.md)
-- [Alpha release checklist](docs/alpha-release-checklist.md)
-- [Changelog](CHANGELOG.md)
-
-## 개발
-
-```bash
-python -m pip install -e ".[dev,browser]"
-pytest
-ruff check .
-mypy --strict src
-python -m compileall -q src tests evals
-```
-
-Test와 포함 fixture는 fake, retired, self-authored data만 사용합니다. Live credential,
-활성 private flag, 허가 없는 저작권 문제 파일, platform session state를 추가하지 마십시오.
-
-## 기여
-
-변경을 작고 검증 가능하게 유지하고 성숙도를 과장하지 마십시오. Target scope,
-submission gate, state-machine invariant, evidence redaction, backward-compatible
-migration을 보존해야 합니다. README의 새 명령은 실제 CLI와 일치해야 합니다.
 
 ## 라이선스
 
