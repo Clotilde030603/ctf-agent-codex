@@ -176,7 +176,12 @@ Start `gjc` from this repository, paste the following request, and replace only
 
 This is an authorized CTF challenge site that I am participating in.
 
-If authentication is required, open the login window and continue after I sign in.
+If authentication is required, open the login window. After opening it, periodically
+check whether the browser has left the login page, an authenticated session cookie
+exists, or a logout/authenticated-user element is visible.
+
+Do not wait for me to type "login complete". Continue automatically as soon as a
+successful login is detected.
 
 Analyze and solve the challenge, then submit the flag automatically.
 After the platform confirms the correct answer, capture the challenge screen,
