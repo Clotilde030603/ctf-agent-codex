@@ -4,154 +4,94 @@
 
 [![CI](https://github.com/Clotilde030603/ctf-agent-codex/actions/workflows/ci.yml/badge.svg?branch=feat%2Fautonomous-ctf-agent-v2)](https://github.com/Clotilde030603/ctf-agent-codex/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB)
-![Status](https://img.shields.io/badge/status-experimental-orange)
+![Status](https://img.shields.io/badge/status-alpha-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
-**A Codex-powered autonomous CTF agent that collects a challenge, analyzes and solves it, verifies and submits the flag, captures evidence, and generates a reproducible write-up.**
+**Give it an authorized CTF challenge URL. It collects the challenge, plans and
+runs solving approaches, verifies a candidate flag, optionally submits it, and
+leaves reproducible evidence and a write-up.**
 
-> Project status: **experimental, executable vertical slice**. The default `codex` path now wires the Codex planner and controlled model-worker lanes into the deterministic workflow, while CTFd/rCTF adapters, verification gates, evidence, resume, and local fixtures remain test-backed. Deep pwn/rev support and live-platform compatibility are still experimental.
-
-What you get:
-
-- challenge collection from one URL, with session reuse and attachment download;
-- recursive triage, classification, Codex-planned hypotheses, and up to three isolated worker lanes;
-- provenance-aware flag verification before any submission;
-- Accepted/Wrong parsing with a durable submission budget;
-- `solve.py`, evidence images, an event ledger, and `writeup.md`;
-- SQLite checkpoints and `ctf-agent resume` after interruption.
-
-```bash
-git clone https://github.com/Clotilde030603/ctf-agent-codex.git
-cd ctf-agent-codex
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e ".[browser]"
-playwright install chromium
-docker version  # the daemon must be running for default reproduction
-```
-
-```bash
-ctf-agent solve "https://ctf.example.com/challenges/123" --auto-submit --writeup
-```
+> Use this project only in CTF competitions, retired challenges, war games, and
+> labs where you have explicit authorization. It is not a general-purpose attack
+> tool and does not grant permission to test third-party systems.
 
 ## What is CTF Agent Codex?
 
-CTF Agent Codex is a local Python application for authorized CTF competitions, retired challenges, war games, and training labs. You provide one challenge URL. A deterministic controller authenticates, downloads the challenge, analyzes preserved artifacts, plans independent hypotheses, runs solver lanes, verifies candidates, cleanly reproduces the solver before submission, optionally submits an approved flag, and captures recoverable evidence and write-ups.
+CTF Agent Codex is a local autonomous CTF assistant built around a deterministic
+Python controller and configurable Codex model roles. The controller owns state,
+scope, budgets, verification, and submission. Models can propose hypotheses,
+inspect artifacts, use controlled tools, and write a solver, but they cannot skip
+safety gates or submit arbitrary values.
 
-The language model does **not** control workflow state. Python owns this fixed progression:
+The project is designed for a user who wants more than a flag-looking model answer.
+A run preserves its inputs, reasoning artifacts, commands, candidate provenance,
+verification result, platform verdict, evidence, and reproduction instructions.
+
+## Key Features
+
+| What you need | What the agent provides |
+| --- | --- |
+| Start from one challenge URL | Platform detection, session check, challenge metadata, attachments, and service hosts |
+| Analyze unfamiliar files | Recursive triage, safe archive extraction, classification, hashes, strings, and tool output |
+| Explore more than one approach | Model-planned hypotheses and up to three isolated asynchronous solver lanes |
+| Use real tools safely | Non-root CTF tool container, bounded argv commands, and host-scoped structured HTTP actions |
+| Avoid false flags | Format, provenance, replay, hardcode, data-dependency, and blind reviewer checks |
+| Submit conservatively | Wrong budget, duplicate prevention, pending-attempt recovery, dry-run, and manual review mode |
+| Resume interrupted work | SQLite checkpoints, saved non-secret runtime settings, and explicit resume overrides |
+| Keep useful results | `solve.py`, event ledger, SHA-256 evidence manifest, Markdown/HTML write-up, provenance JSON |
+| Recover after Accepted | Independent evidence retries, sanitized fallbacks, and `DONE_WITH_WARNINGS` |
+
+## How It Works
+
+```mermaid
+flowchart LR
+    A[Authorized challenge URL] --> B[Authenticate and collect]
+    B --> C[Recursive triage]
+    C --> D[Plan up to 3 approaches]
+    D --> E[Isolated solver lanes]
+    E --> F[Replay and blind verification]
+    F --> G[Clean reproduction]
+    G --> H{Auto submit?}
+    H -- No --> I[READY]
+    H -- Yes --> J[Submit and confirm verdict]
+    J --> K[Evidence and write-up]
+    K --> L[DONE or DONE_WITH_WARNINGS]
+```
+
+The normal state path is:
 
 ```text
 AUTHENTICATE -> INGEST -> TRIAGE -> PLAN -> SOLVE -> VERIFY
 -> REPRODUCE -> SUBMIT -> EVIDENCE_PENDING -> WRITEUP_PENDING -> DONE
 ```
 
-This separation makes submission decisions, retries, resume behavior, and evidence generation auditable.
-
-## Why This Project?
-
-Many proof-of-concept CTF agents stop when a model prints a flag-looking string. This project treats that string as an untrusted candidate. It records where the value came from, rejects examples and placeholders, reruns the solver, checks past Wrong verdicts and the remaining budget, and only then allows submission.
-
-The project also preserves the work product. A successful run is meant to leave a reproducible solver, evidence, structured analysis, state checkpoints, and a fact-bound write-up instead of only a chat transcript.
-
-## Key Features
-
-| Capability | Status | What it does today |
-| --- | --- | --- |
-| URL-based challenge ingestion | Experimental | CTFd API ingestion and generic HTML fallback |
-| Session reuse and browser login | Experimental | Reuses Playwright storage state; opens Chromium for first CTFd login |
-| Attachment download | Implemented | Scoped HTTP download with filename and traversal protection |
-| Recursive triage | Implemented | Hashes, MIME/magic hints, entropy, strings, indicators, safe zip/tar extraction, optional tools |
-| Category classification | Experimental | Classifies web, pwn, rev, crypto, forensics, misc, and mixed signals |
-| Hypothesis scheduler | Implemented | Up to three concurrent, structured lanes |
-| Built-in solver | Experimental | Reproduces direct flag-bearing artifact signals into `solve.py` |
-| Category-specific solvers | Experimental | Crypto, forensics/misc, and static web specialists run before model lanes; pwn/rev rely on the model worker and optional tools |
-| Codex backend | Experimental | Async CLI adapter, schema validation, planner calls, and controlled worker calls are wired into `backend=codex` |
-| Claude backend | Stub | Testable adapter stub only; no production Claude connection |
-| Flag verification gate | Implemented | Format, placeholder, provenance, clean replay, negative control, blind Codex re-derivation, Wrong-history, and budget checks |
-| Automatic submission | Experimental | CTFd submission, verdict parsing, crash-safe pending attempts, duplicate prevention |
-| Evidence and write-up | Experimental | Three evidence images, sanitized transcript, manifest, Markdown, HTML, and provenance JSON |
-| Resume | Implemented | Durable SQLite state plus append-only JSONL events |
-| Benchmark runner | Implemented | Offline YAML manifests with solve timing and reproduction metrics |
-
-## How It Works
-
-```mermaid
-flowchart LR
-    A[Challenge URL] --> B[Authentication]
-    B --> C[Challenge Collection]
-    C --> D[Recursive Triage]
-    D --> E[Hypothesis Planning]
-    E --> F[Specialist Solvers]
-    F --> G[Flag Verification]
-    G --> H[Automatic Submission]
-    H --> I[Accepted Evidence]
-    I --> J[Clean Reproduction]
-    J --> K[Reproducible Write-up]
-```
-
-The controller records every state transition. Recoverable solve and verification failures return to planning or solving. Wrong submissions are remembered and cannot be submitted again. An uncertain submission left by a crash is resolved from platform state or fails closed; it is never blindly repeated.
-
-## Supported Challenge Categories
-
-The table distinguishes deterministic analysis from autonomous deep solving.
-
-| Category | Analysis status | Autonomous solving status | Main tooling |
-| --- | --- | --- | --- |
-| Web | Experimental | Static source/asset analysis plus model-worker fallback and host-scoped HTTP actions | `httpx`, Playwright, route/URL/session indicators |
-| Pwn | Experimental | Model-worker only; deep exploitation is not production-grade | `file`, `strings`, optional `checksec`; pwntools/GDB/ROP tooling must be supplied by the environment |
-| Reverse engineering | Experimental | Model-worker only; deep reversing is not production-grade | Imports/strings/language signals; optional binary tools must be supplied by the environment |
-| Crypto math | Experimental | Deterministic base64/hex/single-byte XOR recovery plus model-worker fallback | Python; PyCryptodome/z3/Sage are optional environment tools, not installed by the agent |
-| Crypto binary | Experimental | Deterministic encoding/XOR recovery plus model-worker fallback | Python and preserved artifacts |
-| Forensics | Experimental | Deterministic strings, metadata/tool-output, nested extraction, and PNG text chunks plus model-worker fallback | Metadata-oriented triage, archive provenance, optional `exiftool`/`binwalk` |
-| Misc / mixed | Experimental | Deterministic artifact signals plus model-worker fallback | Weighted multi-category classification |
-
-Do not interpret category detection as a claim that every challenge in that category can already be solved autonomously.
-
-## Supported Platforms
-
-| Platform | Status | Authentication | Collection | Auto submit |
-| --- | --- | --- | --- | --- |
-| CTFd | Experimental, integration-tested | API session check; optional Playwright login and storage reuse | API first, HTML fallback | Yes |
-| Generic HTML | Experimental | Public/basic HTTP fetch; a custom session must be injected in code | Title, description, links, and flag hints | No generic submission endpoint |
-| rCTF | Experimental, fake-integration-tested | `/api/v1/auth/test` session check | `/api/v1` or `/api/v2` challenge list and attachment mapping | Yes, through `/api/v1/challs/<id>/submit` |
-
-The automated test suite uses fake and `httpx.MockTransport` CTFd fixtures. It does not contain a real account, cookie, or active competition flag.
-
 ## Current Project Status
 
-- Release: `0.1.0`
-- Overall maturity: **Experimental**
-- Automated tests: the current branch includes unit and fake-integration coverage for planner/workers, verification, CTFd/rCTF adapters, evidence/write-up, and benchmark metrics
-- Verified workflow: fake/Mock CTFd ingestion → triage → candidate → verification → Accepted → evidence → write-up → reproduction
-- Not yet verified against: every CTFd/rCTF theme/version, live MFA providers, native Windows, or a real deep exploit challenge
+This repository is an **alpha-quality, executable vertical slice**. The complete
+controller path, Codex CLI backend, isolated workers, CTFd/rCTF adapters, verification
+records, evidence recovery, write-up generation, and local benchmark runner are
+implemented and covered by automated tests.
 
-For milestone details, see [docs/implementation-log.md](docs/implementation-log.md).
+Important limits:
+
+- deep Pwn and Reverse Engineering exploitation is still experimental;
+- Generic HTML collection cannot safely infer a submission endpoint;
+- the Claude backend is a test stub, not a production integration;
+- broad live compatibility across CTF themes, MFA systems, and dynamic instances is
+  not yet proven;
+- the included warmup benchmark is self-authored and is not a claim about difficult
+  real-world CTF solve performance.
 
 ## Requirements
 
-Required:
-
-- macOS or Linux; WSL2 is expected to work but is not continuously tested;
-- Python 3.12 or newer supported by the pinned dependencies;
-- Git;
-- Docker with a running daemon for the default clean-reproduction gate;
-- explicit authorization to access and automate the target CTF.
-
-Required for browser authentication and PNG evidence:
-
-- Playwright's Chromium browser.
-
-Required for model-backed lanes:
-
-- the Codex CLI installed and signed in.
-
-Optional analysis tools are detected at runtime: `file`, `strings`, `checksec`, `exiftool`, and `binwalk`. Missing optional tools are reported in triage instead of being installed automatically.
-
-Native Windows has not been tested. Use WSL2 rather than assuming native Windows support.
+- macOS or Linux; use WSL2 on Windows because native Windows is not supported;
+- Python 3.12 or 3.13;
+- Docker CLI and a running Docker daemon;
+- the Codex CLI installed and signed in for the default model-backed workflow;
+- Playwright Chromium for browser login and PNG evidence;
+- explicit permission to automate the target CTF.
 
 ## Installation
-
-### macOS, Linux, and WSL2
 
 ```bash
 git clone https://github.com/Clotilde030603/ctf-agent-codex.git
@@ -159,112 +99,83 @@ cd ctf-agent-codex
 
 python3.12 -m venv .venv
 source .venv/bin/activate
-
 python -m pip install --upgrade pip
 python -m pip install -e ".[browser]"
 playwright install chromium
 ```
 
-Install Docker using the instructions for your operating system, start the daemon, then verify everything visible to the application:
+Build the versioned CTF tool image:
 
 ```bash
-python --version
-docker version
-ctf-agent --help
+docker build -t ctf-agent-codex-tools:0.1.0 \
+  -f docker/ctf-tools/Dockerfile .
 ```
 
-For development dependencies, install `.[dev,browser]` instead.
-
-For an isolated CLI installation from a checkout:
+You can also install the command in an isolated environment:
 
 ```bash
-pipx install .
-ctf-agent --help
+pipx install ".[browser]"
 ```
-
-Linux and macOS are covered by CI/local testing. WSL2 is the recommended Windows
-path; native Windows is not supported in this alpha.
 
 ## Codex Setup
 
-The project includes a tested asynchronous Codex CLI backend. With the default `CTF_BACKEND=codex`, the workflow calls `ModelHypothesisPlanner`, always runs controlled model-worker lanes with deterministic preflight results as context, and requires a separate blind verifier-model derivation before submission. Set `CTF_BACKEND=static` explicitly for the deterministic-only path.
-
-According to the [official OpenAI Codex CLI documentation](https://learn.chatgpt.com/docs/codex/cli), macOS and Linux users can install or update Codex with:
-
-```bash
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
-```
-
-Then open a terminal and run:
+Install the Codex CLI using the
+[official Codex CLI documentation](https://learn.chatgpt.com/docs/codex/cli), then
+launch it once and sign in:
 
 ```bash
 codex
-```
-
-On first launch, select **Sign in with ChatGPT** or another sign-in method offered by Codex. Verify the executable and authentication before enabling model-backed lanes:
-
-```bash
 codex --version
-codex
+codex login status
 ```
 
-This repository does not store your Codex credentials. Codex authentication is managed by the Codex CLI itself. `CTF_CODEX_BINARY` selects the executable used by planner and worker model calls.
+The repository does not store your Codex credentials. It only invokes the selected
+CLI executable and passes the configured model names and reasoning efforts.
 
 ## First-Time Authentication
 
-CTF platform authentication is separate from Codex authentication.
+CTF platform authentication is separate from Codex authentication. On a supported
+CTFd site, the agent first checks the API session. If the session is missing and no
+saved browser state exists, Playwright opens a visible Chromium window.
 
-For CTFd, the agent first requests `/api/v1/users/me` using any reusable session. If authentication is missing:
+1. Sign in to the CTF in the opened browser.
+2. Complete MFA or CAPTCHA yourself if required.
+3. The agent saves Playwright storage state with mode `0600`.
+4. The scoped HTTP session imports the browser cookies and continues.
 
-1. Playwright launches Chromium. A visible browser is used when no storage state exists.
-2. Log in on the CTF platform page that opens.
-3. Complete MFA or CAPTCHA in that browser if the platform requires it.
-4. The agent polls for a logout/authenticated selector or a session cookie after leaving `/login`.
-5. When authentication is detected, browser storage state is saved with file mode `0600`.
-6. The API session imports the browser cookies and automation continues without a terminal Enter prompt.
-
-Default session location:
-
-```text
-runs/.sessions/<challenge-host>.json
-```
-
-Override it with `CTF_BROWSER_STORAGE_STATE`. The default `runs/` path and common session/profile names are Git-ignored. Storage state can contain live cookies and must still be treated as a password: do not upload it, attach it to an issue, or commit it.
-
-If the stored session expires while the file still exists, delete that host's storage-state file and rerun the command to force a visible login browser.
+The default session path is `runs/.sessions/<challenge-host>.json`. Treat this file
+like a password. Never commit it or attach it to an issue.
 
 ## Quick Start
 
-Use an authorized CTFd challenge URL:
+Check the complete local runtime first:
 
 ```bash
-ctf-agent solve "https://ctf.example.com/challenges/123" \
+ctf-agent doctor
+```
+
+Run an authorized challenge without external submission:
+
+```bash
+ctf-agent solve "https://ctf.example/challenges/123" \
+  --dry-run \
+  --writeup
+```
+
+When the event rules explicitly permit automated submission:
+
+```bash
+ctf-agent solve "https://ctf.example/challenges/123" \
   --auto-submit \
   --writeup
 ```
 
-Use `--auto-submit` only when the event rules allow automated submission. Without `--auto-submit`, or with `--dry-run`, the agent can stop at `READY` after verification and write `verified-candidate.json` for private manual review instead of submitting the candidate.
+Without `--auto-submit`, the run stops at `READY` and writes a private
+`verified-candidate.json` instead of contacting a submission endpoint.
 
 ## Usage
 
-Show the authoritative local command reference:
-
-```bash
-ctf-agent --help
-ctf-agent solve --help
-ctf-agent resume --help
-ctf-agent retry-evidence --help
-ctf-agent doctor --help
-ctf-agent benchmark --help
-```
-
-Solve, submit, and write the report:
-
-```bash
-ctf-agent solve "<challenge-url>" --auto-submit --writeup
-```
-
-Select the production model path and user-provided model identifiers:
+### Choose models and reasoning effort
 
 ```bash
 ctf-agent solve "<challenge-url>" \
@@ -276,153 +187,116 @@ ctf-agent solve "<challenge-url>" \
   --solver-effort xhigh \
   --reviewer-effort high \
   --max-workers 3 \
-  --auto-submit \
-  --writeup
+  --dry-run
 ```
 
-Run the same workflow without external submission:
+`--reasoning-effort` remains a shorthand for all roles. A role-specific option has
+priority when both are supplied. Model identifiers remain user-configurable.
+
+### Resume an interrupted run
 
 ```bash
-ctf-agent solve "<challenge-url>" \
-  --backend codex \
-  --dry-run \
-  --writeup
-```
-
-Disable the Markdown write-up while keeping the Accepted/evidence/reproduction path:
-
-```bash
-ctf-agent solve "<challenge-url>" --auto-submit --no-writeup
-```
-
-Generate public write-up files without exposing the raw flag:
-
-```bash
-ctf-agent solve "<challenge-url>" \
-  --auto-submit \
-  --writeup \
-  --redact-flag
-```
-
-Store runs elsewhere:
-
-```bash
-ctf-agent solve "<challenge-url>" --auto-submit --runs-dir /path/to/ctf-runs
-```
-
-Allow an explicitly authorized localhost/private-address lab:
-
-```bash
-ctf-agent solve "http://127.0.0.1:8000/challenges/7" \
-  --auto-submit \
-  --allow-private-host
-```
-
-Use the weaker local reproduction mode only when Docker cannot be used:
-
-```bash
-ctf-agent solve "<challenge-url>" \
-  --auto-submit \
-  --allow-local-reproduction
-```
-
-This opt-in runs `python3 -I solve.py` on the host. It is not equivalent to clean Docker reproduction.
-
-Resume with the original settings snapshot, overriding only one role when needed:
-
-```bash
+ctf-agent resume <run-id>
 ctf-agent resume <run-id> --solver-model "<model>" --solver-effort xhigh
 ```
 
-Retry missing screenshots for an already Accepted run without resubmitting:
+Resume restores the original non-secret runtime settings. Only explicitly supplied
+options override the snapshot. If the original URL contained a secret query, provide
+it again in memory with `--challenge-url`; it remains redacted on disk.
+
+### Retry evidence after Accepted
 
 ```bash
 ctf-agent retry-evidence <run-id>
 ```
 
-Build and verify the production tool image and local runtime:
+This only works for a durable Accepted/Already Solved run. It does not reopen solving
+or resubmit the flag.
+
+### Other common options
 
 ```bash
-docker build -t ctf-agent-codex-tools:0.1.0 -f docker/ctf-tools/Dockerfile .
-ctf-agent doctor
+# Authorized private-address lab
+ctf-agent solve "http://127.0.0.1:8000/challenges/7" \
+  --allow-private-host --dry-run
+
+# Public report without the raw flag
+ctf-agent solve "<challenge-url>" --auto-submit --redact-flag
+
+# Skip the write-up
+ctf-agent solve "<challenge-url>" --auto-submit --no-writeup
+
+# Use a different run directory or container image
+ctf-agent solve "<challenge-url>" \
+  --runs-dir /path/to/runs \
+  --docker-image ctf-agent-codex-tools:0.1.0
 ```
 
-There is currently no `status`, `--session`, or `--no-submit` option. Use `--dry-run` for a non-submitting run and `--help` as the local source of truth.
+`--allow-local-reproduction` is an explicit weaker host-local fallback. Static-mode
+auto-submission is blocked unless the operator explicitly uses
+`--approve-static-submit`; prefer model-backed independent review instead.
 
 ## Automatic Flag Verification and Submission
 
-`--auto-submit` does not submit the first flag-looking string. Each candidate must pass:
+A flag-looking string is never enough for automatic submission. The workflow keeps
+these decisions separate:
 
-1. the challenge's flag-format policy;
-2. sample and placeholder rejection;
-3. artifact, location, derivation, and solver-command provenance checks;
-4. fresh-process `solve.py` replay;
-5. data-dependency negative control and a separate blind reviewer model;
-6. past Wrong-candidate rejection;
-7. the configured submission budget;
-8. a durable pending-attempt reservation before the external request.
-
-Accepted, Already Solved, Wrong, rate-limited, and unknown responses are parsed separately. A crash in the submission window cannot silently spend a second attempt: resume resolves the pending attempt from platform state or fails closed.
-
-Automatic submission can incur penalties. Confirm that the event rules allow AI assistance and automation before using `--auto-submit`.
-
-## Evidence Capture
-
-After Accepted, the workflow requires:
-
-- `01-challenge.png`: challenge content;
-- `02-exploit-proof.png`: final solver output;
-- `03-accepted.png`: Accepted/Solved platform state;
-- `02-exploit-proof.html`: sanitized terminal transcript;
-- `manifest.json`: SHA-256 hashes, labels, timestamps, source, and redaction metadata.
-
-The browser captures the challenge content region, not the desktop. Terminal rendering redacts common cookies, bearer tokens, API keys, CSRF tokens, passwords, and session values. Each capture is retried independently; successes are preserved, failures enter the manifest, and sanitized challenge/verdict fallbacks are retained. The run can end at `DONE_WITH_WARNINGS` and later use `retry-evidence` without resubmission.
-
-## Automatic Write-up Generation
-
-`writeup.md` is generated from persisted facts rather than model conversation memory. Inputs include `challenge.json`, `triage.json`, hypotheses, verified events, `solve.py`, submission outcome, and the evidence manifest.
-
-A deterministic reviewer checks required headings, evidence hashes and existence, unsupported flag-looking values, and secret-like material. Use `--no-writeup` to skip Markdown generation.
-
-## Resuming an Interrupted Run
-
-```bash
-ctf-agent resume <run-id>
+```text
+format_match
+provenance_verified
+replay_verified
+data_dependency_verified
+independent_verified
+submission_allowed
 ```
 
-The controller restores the validated, credential-free settings snapshot from
-`state.db`, applies only explicit CLI overrides, and continues from the last state.
-Completed work is checkpointed, while append-only events remain in `events.jsonl`.
+The solver is replayed without an expected flag, checked for hardcoded output, and
+run without source artifacts as a negative control. In Codex mode, a separate
+reviewer receives the original inputs and solver but not the expected candidate.
+The reviewer must return matching source provenance, a location, evidence, and a
+reproduction command.
 
-Challenge URLs with credential-bearing query parameters are stored redacted. Re-supply the original URL in memory when resuming such a run:
+Clean Docker reproduction happens before submission. The submission layer recomputes
+the gate, rejects past Wrong candidates, reserves a durable pending attempt, and
+refuses blind duplicate retries after timeouts or rate limits.
 
-```bash
-ctf-agent resume <run-id> \
-  --challenge-url "https://ctf.example/challenge?token=..."
-```
+## Supported Platforms
 
-Use the same `--runs-dir` on resume if the original run used a custom directory:
+| Platform | Collection | Authentication | Submission |
+| --- | --- | --- | --- |
+| CTFd | API-first with HTML fallback | Existing session or Playwright login | Supported; experimental across themes |
+| rCTF | v1/v2 challenge and attachment mapping | Session test endpoint | Supported; fake-integration tested |
+| Generic HTML | Title, description, links, attachments | Public/basic HTTP; custom session must be injected in code | Not guessed; auto-submit stops safely |
 
-```bash
-ctf-agent resume <run-id> --runs-dir /path/to/ctf-runs
-```
+## Supported Challenge Categories
+
+| Category | Current support |
+| --- | --- |
+| Crypto | Base64/hex, single/repeating XOR, Caesar substitution, and optional PyCryptodome/z3 routing |
+| Forensics/Misc | Recursive extraction, metadata, PNG text, PCAP/tshark observations, and tool-output provenance |
+| Web | Source routes, parameters, GraphQL operations, WebSocket URLs, and scoped HTTP worker actions |
+| Reverse Engineering | Typed binutils/rizin/Ghidra/angr profile plus model-worker harness; deep reversing is experimental |
+| Pwn | Typed checksec/GDB/pwntools/ROPgadget profile plus model-worker harness; exploits are experimental |
+
+Missing optional dependencies are reported with installation guidance and fallback
+status. They are never silently treated as success.
 
 ## Output Directory
 
-The current path uses the challenge host, challenge path, and generated run ID:
-
 ```text
-runs/<challenge-host>/<challenge-path>-<run-id>/
-├── challenge.json
+runs/<host>/<challenge>-<run-id>/
 ├── state.db
+├── events.jsonl
+├── challenge.json
 ├── triage.json
 ├── hypotheses.json
-├── events.jsonl
 ├── files/
 ├── artifacts/
+│   ├── lanes/
 │   └── specialist-results.json
 ├── solve.py
 ├── requirements.txt
+├── verified-candidate.json      # dry-run/manual review only
 ├── evidence/
 │   ├── 01-challenge.png
 │   ├── 02-exploit-proof.html
@@ -431,281 +305,132 @@ runs/<challenge-host>/<challenge-path>-<run-id>/
 │   └── manifest.json
 ├── writeup.md
 ├── writeup.html
-├── provenance.json
-└── verified-candidate.json  # READY/manual path only
+└── provenance.json
 ```
 
-Most useful files:
-
-| File | Purpose |
-| --- | --- |
-| `solve.py` | Final reproducible solver for the preserved challenge files |
-| `writeup.md`, `writeup.html` | Fact-bound generated solution documents |
-| `provenance.json` | Source and generated-output hashes for the write-up set |
-| `evidence/` | Challenge, exploit, Accepted proof, and integrity manifest |
-| `state.db` | State, checkpoints, rejected candidates, and submission attempts for resume |
-| `events.jsonl` | Append-only state, verification, submission, and reproduction history |
-| `triage.json` | Recursive file inventory, indicators, tool results, and classification |
-| `artifacts/` | Raw tool output, extracted files, and specialist results |
-
-Do not publish a real run directory without reviewing it for challenge flags, event-private data, and platform policy restrictions.
+If a screenshot fails, successful captures are preserved and sanitized fallback
+evidence is recorded. The run may finish as `DONE_WITH_WARNINGS` and retry only the
+missing evidence later.
 
 ## Configuration
-
-Copy the tracked example and edit only what you need:
 
 ```bash
 cp .env.example .env
 ```
 
-`pydantic-settings` reads `.env` with the `CTF_` prefix. Important settings:
-
-| Variable | Default | Effect / trade-off |
+| Variable | Default | Purpose |
 | --- | --- | --- |
-| `CTF_RUNS_DIR` | `runs` | Run and session root; keep it outside tracked source if desired |
-| `CTF_REQUEST_TIMEOUT_SECONDS` | `20` | HTTP request timeout used by scoped platform sessions |
-| `CTF_TOOL_TIMEOUT_SECONDS` | `30` | Triage tools and solver replay timeout; browser/terminal capture currently has its own 30-second default |
-| `CTF_RETRY_BUDGET` | `2` | HTTP retry budget used by scoped platform sessions |
-| `CTF_SUBMISSION_BUDGET` | `1` | Maximum durable submission attempts per run |
-| `CTF_MAX_HYPOTHESES` | `3` | Planner cap; no more than three hypotheses are scheduled |
-| `CTF_MAX_STATE_STEPS` | `100` | Stops deterministic replanning loops |
-| `CTF_MAX_EXTRACTION_DEPTH` | `3` | Archive recursion limit |
-| `CTF_MAX_EXTRACTED_BYTES` | `268435456` | Total extraction ceiling, 256 MiB |
-| `CTF_RATE_LIMIT_PER_SECOND` | `2` | Request pacing used by scoped platform sessions |
-| `CTF_BROWSER_STORAGE_STATE` | unset | Explicit Playwright storage-state location |
-| `CTF_ALLOW_PRIVATE_HOSTS` | `false` | Allows private/loopback targets; use only for authorized labs |
-| `CTF_ALLOW_LOCAL_REPRODUCTION` | `false` | Replaces Docker gate with weaker host `python -I` replay |
-| `CTF_APPROVE_STATIC_SUBMISSION` | `false` | Explicit operator approval required before static-backend auto-submit |
-| `CTF_REDACT_FLAG` | `false` | Redacts the verified flag in generated Markdown, HTML, and provenance |
-| `CTF_DOCKER_IMAGE` | `ctf-agent-codex-tools:0.1.0` | Versioned non-root image used for workers and clean replay |
+| `CTF_BACKEND` | `codex` | Select model-backed or explicit static mode |
+| `CTF_PLANNER_MODEL` | `gpt-5.6-sol` | Planner model identifier |
+| `CTF_SOLVER_MODEL` | `gpt-5.6-sol` | Solver model identifier |
+| `CTF_VERIFIER_MODEL` | `gpt-5.6-sol` | Blind reviewer model identifier |
+| `CTF_MODEL_CALL_BUDGET` | `20` | Run-wide model call limit |
+| `CTF_MAX_WORKERS` | `3` | Maximum concurrent solver lanes |
+| `CTF_SUBMISSION_BUDGET` | `1` | Durable submission attempt limit |
+| `CTF_ALLOW_PRIVATE_HOSTS` | `false` | Permit authorized private targets |
+| `CTF_ALLOW_LOCAL_REPRODUCTION` | `false` | Opt into weaker host replay |
+| `CTF_APPROVE_STATIC_SUBMISSION` | `false` | Explicitly approve static submission |
+| `CTF_REDACT_FLAG` | `false` | Hide the raw flag in public outputs |
+| `CTF_DOCKER_IMAGE` | `ctf-agent-codex-tools:0.1.0` | Worker/reproduction image |
 
-The `.env` file is Git-ignored. Never put a real flag, cookie, password, or API key in `.env.example`.
-
-## Model Configuration
-
-| Variable | Default |
-| --- | --- |
-| `CTF_BACKEND` | `codex` |
-| `CTF_PLANNER_MODEL` | `gpt-5.6-sol` |
-| `CTF_SOLVER_MODEL` | `gpt-5.6-sol` |
-| `CTF_VERIFIER_MODEL` | `gpt-5.6-sol` |
-| `CTF_PLANNER_EFFORT` | `high` |
-| `CTF_SOLVER_EFFORT` | `xhigh` |
-| `CTF_VERIFIER_EFFORT` | `high` |
-| `CTF_CODEX_BINARY` | `codex` |
-| `CTF_MODEL_TIMEOUT_SECONDS` | `180` |
-| `CTF_MODEL_CALL_BUDGET` | `20` |
-| `CTF_MAX_MODEL_CONTEXT_BYTES` | `524288` |
-| `CTF_MAX_WORKERS` | `3` |
-| `CTF_ALLOW_STATIC_FALLBACK` | `false` |
-| `CTF_TOTAL_RUN_TIMEOUT_SECONDS` | `3600` |
-| `CTF_WORKER_MAX_STEPS` | `12` |
-| `CTF_WORKER_MAX_COMMANDS` | `8` |
-| `CTF_WORKER_MAX_HTTP_REQUESTS` | `8` |
-| `CTF_WORKER_WALL_TIME_SECONDS` | `600` |
-| `CTF_WORKER_NO_PROGRESS_LIMIT` | `3` |
-
-The planner, solver, and verifier model names are passed through as user-provided strings. The agent does not assume that any specific account can run a named model or reasoning effort. A common local policy is to use a stronger security-oriented model for hard web/pwn/rev lanes and a general Codex model for orchestration, triage, and write-up review; see [docs/model-routing.md](docs/model-routing.md).
-
-Model-worker execution records model-call counts, command reports, and wall-clock budgets. Token and cost accounting depend on backend support and are not guaranteed in this release.
-
-The Claude adapter is a test stub. There is no production Claude authentication or API call in this release.
-
-## Security and Scope Restrictions
-
-Use this tool only against targets you are explicitly authorized to test: CTF competitions, retired challenges, war games, and training labs.
-
-- The original challenge host is the initial network scope.
-- Attachment and remote-service hosts must be declared by challenge data before use.
-- Redirect targets are checked again; wildcard internet scanning is forbidden.
-- Private and loopback hosts are blocked unless `--allow-private-host` is explicit.
-- Supported zip/tar extraction enforces traversal, depth, file-count, and total extracted-size limits. `max_file_size` limits scan reads, not individual archive-member extraction.
-- Docker replay uses CPU, memory, PID, read-only filesystem, timeout, and no-network restrictions.
-- Signed URL tokens and similar query secrets are redacted before SQLite/JSONL persistence.
-- Browser storage, cookies, `.env`, `runs/`, and database files are not intended for Git.
-- External skills and executable dependencies must be reviewed; the agent does not auto-install them at runtime.
-
-Before enabling automatic submission, check whether the competition permits AI tools, automated solvers, and automated flag submission. Authorization is the user's responsibility.
-
-See [docs/security-model.md](docs/security-model.md), [docs/security.md](docs/security.md), and [docs/verification.md](docs/verification.md).
+See [.env.example](.env.example) for every timeout, retry, extraction, worker, model,
+rate, and redaction setting.
 
 ## Troubleshooting
 
-### `codex` is not found
-
-- Symptom: model-backed execution reports a missing executable.
-- Check: `command -v codex && codex --version`
-- Fix: install Codex from the [official CLI guide](https://developers.openai.com/codex/cli), restart the shell, and verify `CTF_CODEX_BINARY` if customized.
-
-### Codex sign-in fails
-
-- Symptom: Codex opens but cannot authenticate.
-- Check: run `codex` interactively and inspect its displayed sign-in error.
-- Fix: complete an offered sign-in method in Codex. This project does not manage Codex credentials.
-
-### Playwright or Chromium is missing
-
-- Symptom: `BrowserUnavailable` or evidence screenshot failure.
-- Check: `python -c "import playwright"`
-- Fix: `python -m pip install -e ".[browser]"` followed by `playwright install chromium`.
-
-### The login browser does not appear
-
-- Cause: an expired storage-state file exists, so Playwright tries headless reuse.
-- Check: inspect `runs/.sessions/` or `CTF_BROWSER_STORAGE_STATE`.
-- Fix: delete only the affected host's storage-state file and rerun.
-
-### The session expired
-
-- Symptom: `/api/v1/users/me` remains unauthenticated or login times out.
-- Fix: remove the affected storage-state file, rerun, and log in again. Never share the file.
-
-### Challenge parsing fails
-
-- Symptom: missing title, attachments, or a 404/validation failure.
-- Check: confirm the URL and whether the site exposes CTFd `/api/v1/challenges/<id>`.
-- Fix: verify platform support. Generic HTML parsing is limited and JavaScript-only pages may require adapter work.
-
-### The platform is not CTFd
-
-- Symptom: ingestion falls back to incomplete generic HTML or submission is unavailable.
-- Fix: check whether auto-detection selected `rctf` or `generic`. rCTF has an experimental API adapter; generic HTML can collect content and attachments but cannot guess a submission endpoint.
-
-### Docker reproduction fails
-
-- Check: `ctf-agent doctor` (it rejects a CLI-only installation with a stopped daemon).
-- Fix: start the daemon and build `docker/ctf-tools/Dockerfile`. `--allow-local-reproduction` is an explicit weaker fallback, not the default fix.
-
-### An optional CTF tool is missing
-
-- Symptom: `missing_capabilities` contains `checksec`, `exiftool`, or `binwalk`.
-- Fix: install the tool from a trusted source or continue with reduced triage. The agent will not install it automatically.
-
-### Solver timeout
-
-- Check: inspect `events.jsonl` and the tool stderr artifacts.
-- Fix: increase `CTF_TOOL_TIMEOUT_SECONDS` only after confirming the solver is making progress and remains safe.
-
-### A flag was found but verification failed
-
-- Check: inspect the `flag.verification_failed` event, candidate provenance, flag policy, and fresh replay output.
-- Fix: correct `solve.py` or produce a new evidence-backed candidate. Do not bypass the gate.
-
-### Platform submission failed or was rate-limited
-
-- Check: inspect the latest `flag.submitted` event and CTF platform response.
-- Fix: wait for the **CTF platform's** rate limit, confirm the remaining submission budget, and resume. This is unrelated to GitHub API limits.
-
-### Resume cannot find the run
-
-- Check: use the exact run ID printed by `solve` and the same `--runs-dir`.
-- Fix: restore the run directory. If the URL originally had a token, also pass `--challenge-url`.
-
-### Evidence images are missing
-
-- Check: verify Playwright/Chromium, authenticated storage state, and the platform page selectors.
-- Fix: refresh authentication and rerun/resume. The workflow intentionally fails closed when all three proof images cannot be created.
-
-## Development
+### Start with the doctor
 
 ```bash
-git clone https://github.com/Clotilde030603/ctf-agent-codex.git
-cd ctf-agent-codex
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e ".[dev,browser]"
+ctf-agent doctor
+```
+
+It checks Python, selected backend/models, Codex CLI/authentication, Docker CLI and
+daemon, the tool image, Playwright Chromium, and run-directory write access. A Docker
+executable with a stopped daemon is reported as an error.
+
+### Codex is missing or signed out
+
+```bash
+command -v codex
+codex login status
+```
+
+Install or sign in to Codex, or deliberately select `--backend static` for a
+non-model dry run. Static replay is not independent verification.
+
+### Docker or the tool image is missing
+
+Start the daemon, build `docker/ctf-tools/Dockerfile`, then rerun the doctor. The
+default reproduction gate fails closed when Docker is unavailable.
+
+### Browser login or screenshots fail
+
+```bash
+python -m pip install -e ".[browser]"
 playwright install chromium
 ```
 
-Add a platform by implementing the protocol in `src/ctf_agent/platforms/base.py`, enforcing `HostScope`, and adding parsing, verdict, redirect, and integration tests.
+Delete only the affected host's session file if it expired. After Accepted, use
+`retry-evidence` to recapture missing screenshots without resubmission.
 
-Add a specialist by implementing `Specialist` from `src/ctf_agent/specialists/base.py`. Return only structured `SpecialistResult` values, preserve artifact provenance, and never submit inside a specialist.
+### A candidate was found but not submitted
 
-## Testing
+Inspect `events.jsonl`, `artifacts/specialist-results.json`, and
+`verified-candidate.json`. Common blockers are missing provenance, hardcoded output,
+a failed negative control, reviewer disagreement, changed integrity hashes, a past
+Wrong verdict, or an exhausted budget.
 
-```bash
-# Full suite
-pytest
+### Resume cannot find the run
 
-# Platform and end-to-end integration fixtures
-pytest tests/test_platform.py tests/test_integration_ctfd.py tests/test_e2e.py
-
-# Lint and strict type checking
-ruff check src tests evals
-mypy src/ctf_agent
-
-# Bytecode/import smoke check
-python -m compileall -q src tests evals
-```
-
-Tests use fake/retired data only. Do not add live cookies, active private flags, or account credentials to fixtures.
+Pass the same `--runs-dir` used for the original solve. If the stored URL contains
+`REDACTED`, also pass the original `--challenge-url`.
 
 ## Benchmarking
-
-Run the included retired fixture:
 
 ```bash
 ctf-agent benchmark evals/manifest.yaml
 ```
 
-Manifest shape:
+The manifest records fixture source, license, retirement and authorization status,
+agent/model identity, expected capability, repeats, and budgets. Reports keep
+deterministic and model-solving groups separate and expose command, HTTP, model,
+candidate, verification, evidence, Wrong, timing, and final-state metrics.
 
-```yaml
-repeat_runs: 3
-timeout_seconds: 30
-total_budget_seconds: 300
-challenges:
-  - id: local-retired-warmup
-    category: warmup
-    difficulty: retired
-    source: self-authored
-    license: MIT
-    retired: true
-    authorized_for_benchmark: true
-    expected_solver_capability: deterministic-fixture
-    command: [python3, fixtures/retired-warmup/solve.py]
-    expected_flag: flag{retired_fixture_only}
-    clean_mode: local
+The bundled warmup is a self-authored deterministic fixture with zero model calls.
+Do not interpret its success rate as difficult CTF performance. See
+[docs/evaluation.md](docs/evaluation.md) to add legally redistributable fixtures.
+
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [State machine and recovery](docs/state-machine.md)
+- [Security model](docs/security-model.md)
+- [Model routing](docs/model-routing.md)
+- [Verification](docs/verification.md)
+- [Docker tool image](docs/docker-tools.md)
+- [Benchmarking](docs/evaluation.md)
+- [Alpha release checklist](docs/alpha-release-checklist.md)
+- [Changelog](CHANGELOG.md)
+
+## Development
+
+```bash
+python -m pip install -e ".[dev,browser]"
+pytest
+ruff check .
+mypy --strict src
+python -m compileall -q src tests evals
 ```
 
-The runner records agent/version/commit/model identity, rejects explicitly unauthorized fixtures, and separates deterministic fixtures from model-solving fixtures. Official aggregate metrics are scorer-owned and derived from explicit events, command execution, and clean replay. Fixture-written metrics remain separate `self_reported_metrics` and never alter official aggregates.
-Worker command calls and scoped HTTP requests are reported separately, together with total elapsed time.
-
-This supersedes older README text that said the runner does **not** perform a separate clean-environment replay; the current runner performs clean replay when `clean_replay` is enabled. Token and monetary cost are not authoritative benchmark metrics in this release.
-
-## Roadmap
-
-- [x] Deterministic state machine and SQLite/JSONL resume
-- [x] Scoped CTFd API ingestion and safe attachment download
-- [x] Recursive triage and category classification
-- [x] Hypothesis scheduler and structured specialist results
-- [x] Provenance-aware verification and submission budget
-- [x] Crash-safe CTFd submission and verdict parsing
-- [x] Evidence manifest, sanitized transcript, and generated write-up
-- [x] Fake/Mock CTFd end-to-end and benchmark fixtures
-- [x] Wire model-backed Codex planner and controlled solver workers into the default workflow
-- [x] Experimental crypto, forensics/misc, and static web specialists
-- [x] Experimental rCTF API authentication, collection, attachment, submission, and pending-verdict resolution
-- [ ] Production-grade pwn/rev deep exploitation support
-- [ ] Live validation for broad CTFd/rCTF versions and themes
-- [ ] Live-platform compatibility matrix and selector profiles
-- [ ] Remote-service replay verification
-- [ ] Production Claude backend
-- [ ] Backend-provided token/cost accounting in benchmark reports
-- [ ] Native Windows validation
+Tests and bundled fixtures use fake, retired, or self-authored data. Do not add live
+credentials, active private flags, copyrighted challenge packages without permission,
+or platform session state.
 
 ## Contributing
 
-Contributions are welcome while the project is experimental.
-
-1. Open an issue describing the platform, category, bug, or capability.
-2. Include sanitized logs, the relevant state, reproduction steps, and expected behavior.
-3. Do **not** attach cookies, storage state, API keys, real credentials, active flags, or an unreviewed run directory.
-4. Keep changes small and add focused tests.
-5. Run pytest, Ruff, mypy, and the benchmark before opening a pull request.
-6. Preserve scope restrictions, deterministic transitions, and the verification gate.
-
-Pull requests that weaken submission safety, silently expand network scope, or add unreviewed runtime installers will not be accepted.
+Keep changes small, tested, and honest about maturity. Preserve target scope,
+submission gates, state-machine invariants, evidence redaction, and backward-compatible
+migrations. New README commands must match the real CLI.
 
 ## License
 
@@ -713,4 +438,6 @@ This project is licensed under the [MIT License](LICENSE).
 
 ## Disclaimer
 
-This software is provided for educational use and explicitly authorized security competitions and labs. It does not grant permission to test third-party systems. The user is responsible for target authorization, event rules, AI/automation policies, submission penalties, and all actions performed with the tool. The software is experimental and provided without warranty.
+This software is experimental and provided without warranty. The user is responsible
+for target authorization, event rules, AI/automation policies, submission penalties,
+and all actions performed with the tool.

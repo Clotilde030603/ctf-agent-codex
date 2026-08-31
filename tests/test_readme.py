@@ -66,6 +66,9 @@ def test_readme_cli_examples_match_typer_help() -> None:
             "--solver-model",
             "--reviewer-model",
             "--reasoning-effort",
+            "--planner-effort",
+            "--solver-effort",
+            "--reviewer-effort",
             "--max-workers",
             "--writeup",
             "--no-writeup",
@@ -73,8 +76,17 @@ def test_readme_cli_examples_match_typer_help() -> None:
             "--allow-private-host",
             "--allow-local-reproduction",
             "--redact-flag",
+            "--approve-static-submit",
         ),
-        "resume": ("--runs-dir", "--challenge-url"),
+        "resume": (
+            "--runs-dir",
+            "--challenge-url",
+            "--solver-model",
+            "--solver-effort",
+            "--docker-image",
+        ),
+        "retry-evidence": ("--runs-dir", "--challenge-url"),
+        "doctor": ("--runs-dir", "--backend", "--docker-image"),
         "benchmark": (),
     }
     root_command = get_command(app)
@@ -141,10 +153,12 @@ def test_bilingual_readmes_keep_cli_config_and_limit_claims_in_sync() -> None:
     )
     assert "custom session must be injected in code" in english
     assert "custom session은 코드에서 주입" in korean
-    assert "does **not** perform a separate clean-environment replay" in english
-    assert "별도의 clean-environment replay를 수행하지는 않습니다" in korean
-    assert "not individual archive-member extraction" in english
-    assert "archive member별 extraction 한도가 아닙니다" in korean
+    assert "ctf-agent retry-evidence <run-id>" in english
+    assert "ctf-agent retry-evidence <run-id>" in korean
+    assert "DONE_WITH_WARNINGS" in english
+    assert "DONE_WITH_WARNINGS" in korean
+    assert "deep Pwn" in english
+    assert "깊은 Pwn" in korean
 
 
 def _format_env_value(value: Any) -> str:
