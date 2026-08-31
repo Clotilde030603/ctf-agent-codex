@@ -171,6 +171,23 @@ ctf-agent solve "https://ctf.example/challenges/123" \
 `--auto-submit`을 사용하지 않으면 `READY`에서 멈추고 제출 endpoint를 호출하는
 대신 private `verified-candidate.json`을 기록합니다.
 
+### Gajae Code에서 자연어로 실행
+
+저장소 경로에서 `gjc`를 실행한 뒤 다음처럼 요청할 수 있습니다. `<문제 링크>`만
+실제 문제 URL로 바꾸면 됩니다.
+
+```text
+<문제 링크>
+
+위 사이트는 내가 참가 중인 허가된 CTF 문제 사이트야.
+
+로그인이 필요하면 로그인 창을 열고, 내가 로그인하면 작업을 계속해줘.
+
+문제를 분석하고 풀이한 뒤 플래그를 자동 제출해줘.
+정답이 확인되면 문제 화면, 풀이 과정, 플래그 출력, 제출 결과를 증적으로 캡처하고,
+해당 증적을 기반으로 재현 가능한 Markdown/HTML Write-up까지 자동으로 작성해줘.
+```
+
 ## 사용법
 
 ### 모델과 reasoning effort 선택

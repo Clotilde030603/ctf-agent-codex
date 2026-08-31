@@ -173,6 +173,24 @@ ctf-agent solve "https://ctf.example/challenges/123" \
 Without `--auto-submit`, the run stops at `READY` and writes a private
 `verified-candidate.json` instead of contacting a submission endpoint.
 
+### Run from Gajae Code with natural language
+
+Start `gjc` from this repository, paste the following request, and replace only
+`<challenge-link>` with the real challenge URL:
+
+```text
+<challenge-link>
+
+This is an authorized CTF challenge site that I am participating in.
+
+If authentication is required, open the login window and continue after I sign in.
+
+Analyze and solve the challenge, then submit the flag automatically.
+After the platform confirms the correct answer, capture the challenge screen,
+solving process, flag output, and submission result as evidence. Use that evidence
+to generate reproducible Markdown and HTML write-ups automatically.
+```
+
 ## Usage
 
 ### Choose models and reasoning effort
