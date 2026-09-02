@@ -2,28 +2,35 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import re
 import shlex
-import shutil
 from collections.abc import Callable, Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ctf_agent.auth_broker import AuthSessionBroker
+from ctf_agent.budget_types import ModelBudgetLeaser
 from ctf_agent.config import Settings
-from ctf_agent.ingestion.session import ScopedAsyncSession, SessionConfig
+from ctf_agent.ingestion.session import ScopedAsyncSession
+from ctf_agent.lanes import LaneCheckpoint, LaneRunResult, LaneStatus
 from ctf_agent.models.base import ModelBackend
 from ctf_agent.models.factory import create_codex_backend
+from ctf_agent.reproduction import controller_reproduction_spec
 from ctf_agent.schemas import FlagCandidate, Hypothesis, SpecialistResult
-from ctf_agent.scope import HostScope
-from ctf_agent.workers import (
-    CommandPolicy,
-    LaneWorkspace,
-    SharedModelCallBudget,
-    WorkerBudget,
-    WorkerCore,
-    WorkerResult,
+from ctf_agent.security import protect_file, redact_persisted_value
+from ctf_agent.specialists.artifacts import result_artifacts
+from ctf_agent.specialists.model_context import (
+    checkpoint_seed,
+    http_session,
+    task,
+    worker_context,
+)
+from ctf_agent.specialists.model_lane import prepare_lane
+from ctf_agent.specialists.promotion import (
+    PromotionAuthority,
+    successful_argv,
+    successful_argv_from_artifacts,
 )
 
 BackendFactory = Callable[[Settings, str, Path], ModelBackend]
@@ -39,13 +46,17 @@ class ModelSolverSpecialist:
         backend_factory: BackendFactory = create_codex_backend,
         local_test_mode: bool = False,
         allowed_argv0: set[str] | None = None,
-        shared_model_budget: SharedModelCallBudget | None = None,
+        model_budget: ModelBudgetLeaser | None = None,
+        auth_broker: AuthSessionBroker | None = None,
+        worker_failpoint: Callable[[str], None] | None = None,
     ) -> None:
         self.settings = settings
         self.backend_factory = backend_factory
         self.local_test_mode = local_test_mode
         self.allowed_argv0 = allowed_argv0
-        self.shared_model_budget = shared_model_budget
+        self.model_budget = model_budget
+        self.auth_broker = auth_broker
+        self.worker_failpoint = worker_failpoint
 
     def supports(self, _claim: str) -> bool:
         return True
@@ -53,101 +64,121 @@ class ModelSolverSpecialist:
     async def solve(
         self, hypothesis: Hypothesis, context: dict[str, object]
     ) -> SpecialistResult:
-        run_dir = Path(str(context["run_dir"])).resolve()
-        lane_dir = run_dir / "artifacts" / "lanes" / _lane_id(hypothesis)
-        challenge_copy = lane_dir / "files"
-        if not challenge_copy.exists():
-            source_files = run_dir / "files"
-            if source_files.is_dir():
-                shutil.copytree(source_files, challenge_copy)
-            else:
-                challenge_copy.mkdir(parents=True)
+        """Run bounded durable slices until this invocation reaches a terminal state."""
+        remaining = self.settings.worker_max_steps
+        outcome: LaneRunResult | None = None
+        commands: list[str] = []
+        artifacts: list[str] = []
+        while remaining > 0:
+            slice_steps = min(2, remaining)
+            outcome = await self.run_slice(hypothesis, context, max_steps=slice_steps)
+            remaining -= slice_steps
+            commands.extend(outcome.specialist_result.commands)
+            artifacts.extend(outcome.specialist_result.artifacts)
+            if outcome.status is not LaneStatus.PROGRESS:
+                return outcome.specialist_result.model_copy(
+                    update={
+                        "commands": list(dict.fromkeys(commands)),
+                        "artifacts": list(dict.fromkeys(artifacts)),
+                    }
+                )
+        assert outcome is not None
+        return outcome.specialist_result.model_copy(
+            update={
+                "commands": list(dict.fromkeys(commands)),
+                "artifacts": list(dict.fromkeys(artifacts)),
+            }
+        )
 
-        workspace = LaneWorkspace(lane_dir, challenge_files=run_dir / "files")
-        policy = CommandPolicy(
-            docker_image=self.settings.docker_image,
-            local_test_mode=self.local_test_mode,
-        )
-        if self.allowed_argv0 is not None:
-            policy.allowed_argv0 = self.allowed_argv0
-        configured_model_budget = context.get(
-            "model_call_budget", self.settings.model_call_budget
-        )
-        model_budget = (
-            configured_model_budget
-            if isinstance(configured_model_budget, int)
-            else self.settings.model_call_budget
-        )
-        http_session = self._http_session(context)
-        observer = context.get("event_observer")
-        worker = WorkerCore(
-            self.backend_factory(self.settings, "solver", lane_dir),
-            workspace,
-            budget=WorkerBudget(
-                max_steps=self.settings.worker_max_steps,
-                max_model_calls=min(
-                    self.settings.worker_max_steps,
-                    model_budget,
-                ),
-                max_commands=self.settings.worker_max_commands,
-                max_http_requests=self.settings.worker_max_http_requests,
-                max_wall_time_seconds=self.settings.worker_wall_time_seconds,
-                command_timeout_seconds=self.settings.tool_timeout_seconds,
-                max_no_progress_steps=self.settings.worker_no_progress_limit,
-            ),
-            policy=policy,
-            shared_model_budget=self.shared_model_budget,
-            http_session=http_session,
-            event_observer=observer if callable(observer) else None,
-        )
+    async def run_slice(
+        self,
+        hypothesis: Hypothesis,
+        context: dict[str, object],
+        *,
+        max_steps: int | None = None,
+        deadline: datetime | None = None,
+    ) -> LaneRunResult:
+        """Execute one bounded lane slice and commit its continuation checkpoint."""
+        lane = prepare_lane(self, hypothesis, context)
         try:
-            result = await worker.run(
-                self._task(hypothesis),
-                self._context(hypothesis, context, lane_dir),
+            worker_slice = await lane.worker.run_slice(
+                self._task(),
+                self._context(hypothesis, context, lane.lane_dir),
+                checkpoint=lane.checkpoint,
+                max_steps=max_steps,
+                deadline=deadline,
             )
+            result = worker_slice.result
         finally:
-            if http_session is not None:
-                await http_session.aclose()
-        report_path = lane_dir / "worker-result.json"
+            if lane.http_session is not None:
+                await lane.http_session.aclose()
+        report_path = lane.lane_dir / "worker-result.json"
         report_path.write_text(
-            json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
+            json.dumps(
+                redact_persisted_value(result.model_dump(mode="json")),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
             encoding="utf-8",
         )
+        protect_file(report_path)
 
-        solve_path = next(
-            (
-                Path(path)
-                for path in result.written_files
-                if Path(path).name == "solve.py" and Path(path).is_file()
-            ),
-            None,
-        )
+        solve_candidate = lane.lane_dir / "solve.py"
+        solve_path: Path | None = solve_candidate if solve_candidate.is_file() else None
         candidates: list[FlagCandidate] = []
-        if result.status == "finished" and solve_path is not None:
-            candidates = [
-                candidate
-                for candidate in result.flag_candidates
-                if self._candidate_reproduced(result, candidate, solve_path)
-            ]
-        artifacts = _result_artifacts(run_dir, result.model_dump(mode="json"))
-        artifacts.append(str(report_path.relative_to(run_dir)))
+        receipt_store = lane.worker.execution_receipts
+        if (
+            result.status == "finished"
+            and solve_path is not None
+            and receipt_store is not None
+        ):
+            authority = PromotionAuthority(receipt_store, lane.checkpoint.lane_id, solve_path)
+            for candidate in result.flag_candidates:
+                successful = successful_argv(
+                    result, candidate, authority
+                ) or successful_argv_from_artifacts(
+                    candidate, worker_slice.checkpoint.artifacts, authority
+                )
+                if successful is None:
+                    continue
+                candidate = candidate.model_copy(
+                    update={
+                        "reproduction_spec": controller_reproduction_spec(
+                            lane.run_dir,
+                            lane.lane_dir,
+                            successful,
+                            requires_auth_handle=bool(
+                                lane.http_session is not None
+                                and lane.http_session.authenticated
+                            ),
+                        )
+                    }
+                )
+                candidates.append(candidate)
+        artifacts = result_artifacts(lane.run_dir, result.model_dump(mode="json"))
+        artifacts.append(str(report_path.relative_to(lane.run_dir)))
         if solve_path is not None:
-            relative_solve = str(solve_path.relative_to(run_dir))
+            relative_solve = str(solve_path.relative_to(lane.run_dir))
             if relative_solve not in artifacts:
                 artifacts.append(relative_solve)
 
         confirmed = bool(candidates and solve_path is not None)
-        return SpecialistResult(
+        specialist_result = SpecialistResult(
             hypothesis_id=hypothesis.id,
             status="confirmed" if confirmed else "inconclusive",
-            facts=result.facts,
+            facts=list(worker_slice.checkpoint.verified_facts),
             artifacts=artifacts,
             commands=[
                 shlex.join(report.argv)
                 for report in result.reports
                 if report.action == "run" and report.argv
             ],
-            reproduction_command="python3 solve.py" if solve_path else "",
+            reproduction_command=(
+                shlex.join(candidates[0].reproduction_spec.argv)
+                if candidates and candidates[0].reproduction_spec is not None
+                else "python3 solve.py" if solve_path else ""
+            ),
             flag_candidates=candidates,
             next_action=result.message,
             confidence=(
@@ -156,46 +187,39 @@ class ModelSolverSpecialist:
                 else 0.0
             ),
         )
-
-    @staticmethod
-    def _candidate_reproduced(
-        result: WorkerResult,
-        candidate: FlagCandidate,
-        solve_path: Path,
-    ) -> bool:
-        try:
-            declared = shlex.split(candidate.solver_command)
-        except ValueError:
-            return False
-        if not declared or Path(declared[-1]).name != solve_path.name:
-            return False
-        for report in result.reports:
-            if (
-                report.action != "run"
-                or report.status != "ok"
-                or report.exit_code != 0
-                or not report.stdout_artifact
-                or not report.argv
-                or Path(report.argv[-1]).name != solve_path.name
-            ):
-                continue
-            stdout = Path(report.stdout_artifact)
-            if stdout.is_file() and candidate.value in stdout.read_text(
-                encoding="utf-8", errors="replace"
-            ):
-                return True
-        return False
-
-    @staticmethod
-    def _task(hypothesis: Hypothesis) -> str:
-        return (
-            "Solve this explicitly authorized CTF hypothesis through controlled actions. "
-            "Challenge files are copied under files/. Use only argv command actions or "
-            "relative write_file actions. Create a data-dependent solve.py, execute it, "
-            "record new facts with provenance, and finish only after emitting any flag "
-            "candidates with source_artifact, source_location, derivation, and solver_command. "
-            f"Hypothesis: {hypothesis.claim}"
+        status = LaneStatus.SOLVED if confirmed else worker_slice.status
+        if status is LaneStatus.SOLVED and not confirmed:
+            status = LaneStatus.STALLED
+        if self.worker_failpoint is not None:
+            self.worker_failpoint("checkpoint_save")
+        committed = lane.store.save(
+            worker_slice.checkpoint.model_copy(
+                update={
+                    "status": status,
+                    "artifacts": tuple(
+                        dict.fromkeys((*worker_slice.checkpoint.artifacts, *artifacts))
+                    ),
+                }
+            )
         )
+        return LaneRunResult(
+            status=status,
+            checkpoint=committed,
+            specialist_result=specialist_result,
+        )
+
+    def _checkpoint_seed(
+        self,
+        run_id: str,
+        lane_id: str,
+        hypothesis: Hypothesis,
+        context: Mapping[str, object],
+    ) -> LaneCheckpoint:
+        return checkpoint_seed(self, run_id, lane_id, hypothesis, context)
+
+    @staticmethod
+    def _task() -> str:
+        return task()
 
     @staticmethod
     def _context(
@@ -203,76 +227,7 @@ class ModelSolverSpecialist:
         context: Mapping[str, object],
         lane_dir: Path,
     ) -> dict[str, Any]:
-        return {
-            "hypothesis": hypothesis.model_dump(mode="json"),
-            "challenge": context.get("challenge", {}),
-            "flag_policy": context.get("flag_policy", {}),
-            "classification": context.get("classification", {}),
-            "triage": context.get("triage", {}),
-            "previous_attempts_and_failures": context.get(
-                "previous_attempts_and_failures", []
-            ),
-            "preflight_results": context.get("preflight_results", []),
-            "lane_workspace": str(lane_dir),
-            "challenge_copy": "files/",
-            "network_policy": (
-                "Docker commands use --network=none. Remote access is available only "
-                "through the structured http_request action and only for authorized hosts."
-            ),
-            "authorized_service_hosts": context.get("service_hosts", []),
-        }
+        return worker_context(hypothesis, context, lane_dir)
 
     def _http_session(self, context: Mapping[str, object]) -> ScopedAsyncSession | None:
-        challenge = context.get("challenge")
-        if not isinstance(challenge, Mapping):
-            return None
-        challenge_url = challenge.get("url")
-        if not isinstance(challenge_url, str) or not challenge_url:
-            return None
-        raw_hosts = context.get("service_hosts", [])
-        extra_hosts = [str(item) for item in raw_hosts] if isinstance(raw_hosts, list) else []
-        scope = HostScope.from_url(
-            challenge_url,
-            extra_hosts=extra_hosts,
-            allow_private_hosts=self.settings.allow_private_hosts,
-        )
-        return ScopedAsyncSession(
-            scope,
-            config=SessionConfig(
-                timeout_seconds=self.settings.request_timeout_seconds,
-                retry_budget=self.settings.retry_budget,
-                rate_limit_per_second=self.settings.rate_limit_per_second,
-            ),
-        )
-
-
-def _lane_id(hypothesis: Hypothesis) -> str:
-    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", hypothesis.id).strip("-") or "lane"
-    fingerprint = hashlib.sha256(
-        json.dumps(hypothesis.model_dump(mode="json"), sort_keys=True).encode()
-    ).hexdigest()[:10]
-    return f"{safe[:48]}-{fingerprint}"
-
-
-def _result_artifacts(run_dir: Path, payload: Any) -> list[str]:
-    paths: list[str] = []
-
-    def visit(value: Any) -> None:
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if key.endswith("_artifact") or key in {"written_path", "written_files"}:
-                    visit(item)
-                elif isinstance(item, dict | list):
-                    visit(item)
-        elif isinstance(value, list):
-            for item in value:
-                visit(item)
-        elif isinstance(value, str):
-            path = Path(value)
-            if path.is_absolute() and path.is_file() and run_dir in path.parents:
-                relative = str(path.relative_to(run_dir))
-                if relative not in paths:
-                    paths.append(relative)
-
-    visit(payload)
-    return paths
+        return http_session(self, context)

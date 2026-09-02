@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -58,5 +57,7 @@ def build_provenance_index(
 
 
 def save_provenance_index(index: dict[str, Any], output: Path) -> Path:
-    output.write_text(json.dumps(index, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    from ctf_agent.security import secure_write_json
+
+    secure_write_json(output, index)
     return output

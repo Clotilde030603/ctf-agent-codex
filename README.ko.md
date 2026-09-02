@@ -23,9 +23,10 @@ CTF Agent Codex는 결정론적 Python controller와 역할별로 설정 가능�
 통제된 도구를 사용하고, solver를 작성할 수 있지만 안전 gate를 건너뛰거나
 임의의 값을 제출할 수 없습니다.
 
-단순히 flag처럼 보이는 모델 답변을 받는 것이 아니라, 입력, 분석 artifact,
-실행 명령, 후보 provenance, 검증 결과, 플랫폼 verdict, 증적, 재현 방법까지
-남기고 싶은 사용자를 위한 프로젝트입니다.
+단순히 flag처럼 보이는 모델 답변을 받는 것이 아니라, 인증·HTTP·browser·
+packaged skill 가용성을 하나의 Controller 소유 capability snapshot으로
+관리하고, 입력, 분석 artifact, 실행 명령, 후보 provenance, 검증 결과,
+플랫폼 verdict, 증적, 재현 방법까지 남기는 프로젝트입니다.
 
 ## 주요 기능
 
@@ -33,7 +34,7 @@ CTF Agent Codex는 결정론적 Python controller와 역할별로 설정 가능�
 | --- | --- |
 | 문제 URL 하나로 시작 | 플랫폼 감지, 세션 확인, 문제 정보, 첨부파일, service host 수집 |
 | 낯선 파일 분석 | 재귀 triage, 안전한 archive 해제, category 분류, hash, strings, 도구 결과 |
-| 여러 접근 동시 탐색 | 모델 기반 가설과 최대 3개의 격리된 비동기 solver lane |
+| 여러 접근 동시 탐색 | 증거 순위 기반 progressive deepening adaptive frontier: 전체 hypothesis 최대 6개, 동시에 활성화되는 격리 비동기 solver lane 최대 3개 |
 | 실제 도구의 안전한 사용 | non-root CTF 도구 container, argv 명령, host-scoped HTTP action |
 | 잘못된 플래그 방지 | format, provenance, replay, hardcode, 데이터 의존성, blind reviewer 검증 |
 | 보수적인 제출 | Wrong budget, 중복 차단, pending 복구, dry-run, 수동 검토 모드 |
@@ -47,8 +48,8 @@ CTF Agent Codex는 결정론적 Python controller와 역할별로 설정 가능�
 flowchart LR
     A[허가된 문제 URL] --> B[인증 및 수집]
     B --> C[재귀 triage]
-    C --> D[최대 3개 접근 계획]
-    D --> E[격리 solver lane]
+    C --> D[가설 계획 및 순위화]
+    D --> E[Adaptive frontier: 활성 3개 / 전체 6개]
     E --> F[Replay 및 blind 검증]
     F --> G[Clean reproduction]
     G --> H{자동 제출?}
@@ -58,9 +59,16 @@ flowchart LR
     K --> L[DONE 또는 DONE_WITH_WARNINGS]
 ```
 
+실행 시 CLI는 `AutonomousWorkflow`와 Controller 기반 run state(SQLite schema
+v7 및 `events.jsonl`)를 생성합니다. 기본 `codex` 경로는 deterministic
+artifact/category preflight 후 `ModelHypothesisPlanner`, `WorkerCore`를 통한
+제한된 `ModelSolverSpecialist` lane, replay 및 blind 검증, 제출, 증적,
+Write-up, reproduction을 수행합니다. Static mode는 명시적인 deterministic
+fallback이며 independent verification이 아닙니다.
+
 ## 현재 프로젝트 상태
 
-현재 저장소는 **실행 가능한 alpha vertical slice**입니다. Controller 전체 흐름,
+현재 저장소는 **실행 가능한 alpha vertical slice**입니다. 인증, HTTP, browser, packaged skill 가용성은 Controller가 소유한 하나의 capability snapshot으로 표현됩니다. Controller 전체 흐름,
 Codex CLI backend, 격리 worker, CTFd/rCTF adapter, 검증 기록, 증적 복구,
 Write-up 생성, 로컬 benchmark runner가 구현되어 있고 자동 테스트로 검증됩니다.
 
@@ -71,8 +79,8 @@ Write-up 생성, 로컬 benchmark runner가 구현되어 있고 자동 테스트
 - Claude backend는 production 연동이 아닌 테스트 stub입니다.
 - 다양한 live CTF theme, MFA, 동적 instance에 대한 폭넓은 호환성은 아직
   검증되지 않았습니다.
-- 포함된 warmup benchmark는 자체 제작 fixture이며 고난도 실전 CTF 성능을
-  의미하지 않습니다.
+- 포함된 12개 문제 B0-B5 로컬 pilot은 자체 제작 계측이며 고난도 실전 CTF
+  성능을 의미하지 않습니다.
 
 ## 요구사항
 
@@ -145,6 +153,24 @@ Playwright가 보이는 Chromium 창을 엽니다.
 ctf-agent doctor
 ```
 
+선택적으로 결정론적 paired evaluation 실행:
+
+```bash
+ctf-agent benchmark evals/manifest.v2.yaml \
+  --ablation-matrix evals/ablations.yaml \
+  --output report.json
+```
+
+Benchmark는 필수 challenge solve path가 아닌 개발/평가용 subsystem입니다.
+일반 pull-request CI에서는 benchmark workload를 실행하지 않습니다. Full B0-B5
+평가는 전용 `Full B0-B5 Benchmark` workflow에서 manual dispatch, nightly
+schedule 또는 published release 때 실행합니다.
+
+레거시 `evals/manifest.yaml` 명령은 retired warmup/harness smoke test일 뿐이며
+autonomous-workflow benchmark가 아니고 모델 성능 증적으로 사용하면 안 됩니다.
+권위 있는 평가는 manifest v2와 scorer가 소유한 실제 `AutonomousWorkflow`를
+사용합니다.
+
 외부 제출 없이 허가된 문제 실행:
 
 ```bash
@@ -216,6 +242,10 @@ ctf-agent resume <run-id> --solver-model "<model>" --solver-effort xhigh
 Resume은 최초 실행의 비밀 제외 설정 snapshot을 복원합니다. 명시적으로 지정한
 option만 override합니다. 최초 URL에 secret query가 있었다면 `--challenge-url`로
 메모리에 다시 전달하며 디스크에는 redacted 상태로 유지됩니다.
+`SOLVE` 또는 `VERIFY` 상태에서 재개 중 인증이 필요하면 Controller는
+`AUTHENTICATE`로 전환하고 설정된 인증 경로를 연 뒤, 재인증이 성공한 경우에만
+중단된 상태로 돌아갑니다. 메모리의 인증 handle 자체는 process restart 후
+복원되지 않습니다.
 
 ### Accepted 이후 증적 재시도
 
@@ -302,8 +332,16 @@ cp .env.example .env
 | `CTF_PLANNER_MODEL` | `gpt-5.6-sol` | planner model identifier |
 | `CTF_SOLVER_MODEL` | `gpt-5.6-sol` | solver model identifier |
 | `CTF_VERIFIER_MODEL` | `gpt-5.6-sol` | blind reviewer model identifier |
-| `CTF_MODEL_CALL_BUDGET` | `20` | run 전체 model call 한도 |
-| `CTF_MAX_WORKERS` | `3` | 동시 solver lane 최대값 |
+| `CTF_MODEL_CALL_BUDGET` | `20` | 공유 run 전체 model-call 예산. 기본값에서는 elastic 확장이 비활성화되어 있으며(`CTF_MODEL_BUDGET_MAX_EXTENSIONS=0`), 활성화하면 persisted `ProgressEvidence`가 필요하고 planner/verifier reserve를 보존하며 hard limit 안에서만 확장 |
+| `CTF_MODEL_BUDGET_VERIFIER_FLOOR` | `1` | 빌릴 수 없는 verifier reserve |
+| `CTF_MODEL_BUDGET_MAX_EXTENSIONS` | `0` | 증거로 허가되는 elastic 확장 최대 횟수 |
+| `CTF_MAX_HYPOTHESES` | `6` | 전체 frontier pool에 허용되는 hypothesis 최대 수 |
+| `CTF_MAX_WORKERS` | `3` | 동시 solver lane 최대 수 |
+| `CTF_LANE_QUANTUM_STEPS` | `2` | lane scheduling quantum당 제한된 model step 수 |
+| `CTF_FRONTIER_ACTIVE_WIDTH` | `3` | 동시에 활성화되는 lane 최대 수 |
+| `CTF_FRONTIER_TOTAL_POOL` | `6` | frontier가 유지하는 전체 hypothesis 최대 수 |
+| `CTF_FRONTIER_MAX_ROUNDS` | `3` | progressive deepening 최대 round 수 |
+| `CTF_CONTEXT_RECENT_REPORT_LIMIT` | `3` | 최근 report window; durable verified fact는 별도 보존 |
 | `CTF_SUBMISSION_BUDGET` | `1` | durable 제출 시도 한도 |
 | `CTF_ALLOW_PRIVATE_HOSTS` | `false` | 허가된 private target 허용 |
 | `CTF_ALLOW_LOCAL_REPRODUCTION` | `false` | 약한 host replay opt-in |
@@ -311,8 +349,11 @@ cp .env.example .env
 | `CTF_REDACT_FLAG` | `false` | 공개 output에서 raw flag 숨김 |
 | `CTF_DOCKER_IMAGE` | `ctf-agent-codex-tools:0.1.0` | worker/reproduction image |
 
-모든 timeout, retry, extraction, worker, model, rate, redaction 설정은
-[.env.example](.env.example)을 참고하십시오.
+Role별 projection 기본값은 planner/replan/verifier/reviewer `131072` bytes, solver `196608` bytes이며 `CTF_MAX_MODEL_CONTEXT_BYTES=196608`은 backend ceiling입니다. 모든 timeout, retry, extraction, worker, model, rate, redaction 설정은 [.env.example](.env.example)을 참고하십시오.
+
+Benchmark authority는 scorer가 소유한 실제 `AutonomousWorkflow`입니다. command 출력과 self-reported metric은 진단용일 뿐이며, 로컬 B0-B5 fixture는 offline synthetic/instrumentation 사례로 실제 모델 성능 주장이 아닙니다.
+
+패키지된 category skill은 trusted registry에서 로드되고 hash와 함께 기록됩니다. Durable lane checkpoint, CAS fact, lifecycle/frontier event, crash recovery는 versioned state artifact를 사용하며, controller command receipt와 durable redaction/private mode를 기록합니다. 인증 handle은 process restart 후 유지되지 않아 실제 reauthentication route가 필요합니다. Report는 scorer 소유의 필수 metric과 결정론적 통계 및 재현 가능한 context byte를 사용합니다.
 
 ## 문제 해결
 

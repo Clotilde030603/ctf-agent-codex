@@ -1,4 +1,5 @@
 import asyncio
+import stat
 from pathlib import Path
 
 import pytest
@@ -77,6 +78,37 @@ def test_sensitive_url_query_is_redacted_from_state_and_events(tmp_path: Path) -
         challenge_url="https://ctf.test/challenges/7?token=secret-value&view=full",
     )
     assert resumed.values["challenge_url"].endswith("token=secret-value&view=full")
+
+
+def test_run_persistence_redacts_credentials_and_uses_private_permissions(tmp_path: Path) -> None:
+    # Given: a real run ledger receiving nested model-originated credential material.
+    controller = Controller(Settings(runs_dir=tmp_path / "runs"), {})
+    context = controller.create_run(
+        "https://ctf.test/challenges/private", auto_submit=False, writeup=False
+    )
+
+    # When: raw messages, facts, candidate details, and report metadata are persisted.
+    context.ledger.append(context.record.run_id, "model.completed", {
+        "message": "Authorization: Bearer bearer-secret-123",
+        "facts": ["cookie: session=cookie-secret-456"],
+        "candidates": [{"source_location": "api-key=api-secret-789"}],
+        "report": {"access_token": "access-secret-012"},
+    })
+
+    # Then: no credential survives and every sensitive persistence path is owner-only.
+    persisted = (context.record.run_dir / "state.db").read_bytes() + (
+        context.record.run_dir / "events.jsonl"
+    ).read_bytes()
+    for secret in (
+        b"bearer-secret-123",
+        b"cookie-secret-456",
+        b"api-secret-789",
+        b"access-secret-012",
+    ):
+        assert secret not in persisted
+    assert stat.S_IMODE(context.record.run_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((context.record.run_dir / "state.db").stat().st_mode) == 0o600
+    assert stat.S_IMODE((context.record.run_dir / "events.jsonl").stat().st_mode) == 0o600
 
 
 @pytest.mark.asyncio

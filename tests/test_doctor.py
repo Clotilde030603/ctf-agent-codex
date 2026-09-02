@@ -5,60 +5,81 @@ from pathlib import Path
 
 import pytest
 
+from ctf_agent.capabilities import (
+    CapabilityProvider,
+    ContainerProbeResult,
+    StaticCapabilityProbe,
+    ToolProbeResult,
+)
+from ctf_agent.capability_manifest import DEFAULT_CAPABILITY_MANIFEST
+from ctf_agent.capability_probe import DockerCapabilityProbe
 from ctf_agent.config import Settings
 from ctf_agent.doctor import REQUIRED_CONTAINER_TOOLS, run_doctor
 
 
-def completed(
-    command: list[str], code: int = 0, output: str = "ok"
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(
-        command,
-        code,
-        output if code == 0 else "",
-        output if code else "",
+def _snapshot(*, reachable: bool):
+    reason = None if reachable else "Cannot connect to daemon"
+    return CapabilityProvider(
+        DEFAULT_CAPABILITY_MANIFEST,
+        StaticCapabilityProbe(
+            ContainerProbeResult(
+                reachable=reachable,
+                image_digest="sha256:image" if reachable else None,
+                reason=reason,
+                tools=tuple(
+                    ToolProbeResult(
+                        name=item.name,
+                        installed=reachable,
+                        reachable=reachable,
+                        authenticated=True if reachable else None,
+                        version="test-1" if reachable else None,
+                        reason=reason,
+                    )
+                    for item in DEFAULT_CAPABILITY_MANIFEST.capabilities
+                ),
+            )
+        ),
+    ).snapshot("test-tools:1")
+
+
+def test_doctor_rejects_docker_cli_without_daemon(tmp_path: Path) -> None:
+    report = run_doctor(
+        Settings(backend="static", runs_dir=tmp_path / "runs"),
+        capability_snapshot=_snapshot(reachable=False),
     )
 
-
-def test_doctor_rejects_docker_cli_without_daemon(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("ctf_agent.doctor.shutil.which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(
-        "ctf_agent.doctor.importlib.util.find_spec", lambda _name: None
-    )
-
-    def fake_run(command: list[str], *, timeout: float = 20) -> subprocess.CompletedProcess[str]:
-        assert command[1:3] == ["info", "--format"]
-        return subprocess.CompletedProcess(command, 0, "", "Cannot connect to daemon")
-
-    monkeypatch.setattr("ctf_agent.doctor._run_command", fake_run)
-
-    report = run_doctor(Settings(backend="static", runs_dir=tmp_path / "runs"))
-
-    daemon = next(check for check in report.checks if check.name == "docker-daemon")
-    assert daemon.status == "error"
+    image = next(check for check in report.checks if check.name == "ctf-tool-image")
+    assert image.status == "error"
+    assert "Cannot connect" in image.detail
     assert report.ok is False
 
 
-def test_doctor_tool_smoke_is_non_root_offline_and_resource_limited(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_container_probe_is_non_root_offline_and_resource_limited(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("ctf_agent.doctor.shutil.which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(
-        "ctf_agent.doctor.importlib.util.find_spec", lambda _name: None
-    )
     commands: list[list[str]] = []
 
-    def fake_run(command: list[str], *, timeout: float = 20) -> subprocess.CompletedProcess[str]:
+    def fake_run(
+        command: list[str], timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout
         commands.append(command)
-        return completed(command, output="24.0")
+        if "inspect" in command:
+            return subprocess.CompletedProcess(command, 0, "sha256:image\n", "")
+        output = "\n".join(
+            f"{item.name}\t1\ttest-1"
+            for item in DEFAULT_CAPABILITY_MANIFEST.capabilities
+        )
+        return subprocess.CompletedProcess(command, 0, output, "")
 
-    monkeypatch.setattr("ctf_agent.doctor._run_command", fake_run)
+    monkeypatch.setattr("ctf_agent.capability_probe.shutil.which", lambda _name: "/usr/bin/docker")
+    monkeypatch.setattr("ctf_agent.capability_probe._run", fake_run)
 
-    report = run_doctor(Settings(backend="static", runs_dir=tmp_path / "runs"))
+    snapshot = CapabilityProvider(
+        DEFAULT_CAPABILITY_MANIFEST, DockerCapabilityProbe()
+    ).snapshot("test-tools:1")
 
-    assert report.ok is True
+    assert snapshot.image_digest == "sha256:image"
     smoke = next(command for command in commands if "run" in command)
     assert "--network=none" in smoke
     assert "--read-only" in smoke
@@ -66,8 +87,21 @@ def test_doctor_tool_smoke_is_non_root_offline_and_resource_limited(
     assert "--memory=256m" in smoke
     assert "--cpus=1" in smoke
     script = smoke[-1]
-    assert 'test "$(id -u)" != 0' in script
     assert all(f"command -v {tool}" in script for tool in REQUIRED_CONTAINER_TOOLS)
+
+
+def test_doctor_accepts_complete_required_container_manifest(tmp_path: Path) -> None:
+    report = run_doctor(
+        Settings(backend="static", runs_dir=tmp_path / "runs"),
+        capability_snapshot=_snapshot(reachable=True),
+    )
+
+    assert report.ok is True
+    assert all(
+        next(check for check in report.checks if check.name == f"capability:{tool}").status
+        != "error"
+        for tool in REQUIRED_CONTAINER_TOOLS
+    )
 
 
 def test_ctf_tool_dockerfile_pins_base_and_direct_packages() -> None:

@@ -283,7 +283,10 @@ def test_codex_cli_backend_validates_structured_json(tmp_path: Path) -> None:
     response = asyncio.run(backend.complete(ModelRequest(prompt="solve this")))
 
     assert response.content == "ok"
-    assert response.metadata == {"prompt": "solve this"}
+    assert response.metadata["prompt"] == "solve this"
+    manifest = response.metadata["projection_manifest"]
+    assert manifest["rendered_bytes"] <= manifest["budget_bytes"]
+    assert manifest["role"] == "solver"
 
 
 def test_codex_cli_backend_rejects_invalid_json(tmp_path: Path) -> None:

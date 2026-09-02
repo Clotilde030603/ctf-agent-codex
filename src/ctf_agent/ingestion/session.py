@@ -4,10 +4,10 @@ import asyncio
 import json
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -48,6 +48,7 @@ class ScopedAsyncSession:
         self._request_observer = request_observer
         self._rate_lock = asyncio.Lock()
         self._last_request_at = 0.0
+        self._authenticated_origin: str | None = None
         headers = {"User-Agent": self.config.user_agent, **self.config.default_headers}
         self.client = client or httpx.AsyncClient(
             timeout=self.config.timeout_seconds,
@@ -67,6 +68,28 @@ class ScopedAsyncSession:
         if self._owned_client:
             await self.client.aclose()
 
+    @property
+    def authenticated(self) -> bool:
+        return self._authenticated_origin is not None
+
+    @property
+    def authenticated_origin(self) -> str | None:
+        return self._authenticated_origin
+
+    def mark_authenticated(self, origin_url: str) -> None:
+        self.scope.require(origin_url, context="authentication origin")
+        self._authenticated_origin = _origin(origin_url)
+
+    def clone(self, scope: HostScope) -> ScopedAsyncSession:
+        clone = ScopedAsyncSession(
+            scope,
+            config=replace(self.config, cookies_path=None),
+            client=self.client,
+            request_observer=self._request_observer,
+        )
+        clone._authenticated_origin = self._authenticated_origin
+        return clone
+
     async def get(self, url: str, **kwargs: Any) -> httpx.Response:
         return await self.request("GET", url, **kwargs)
 
@@ -83,7 +106,14 @@ class ScopedAsyncSession:
         redirect_chain: list[dict[str, Any]] = []
         while True:
             await self._throttle()
-            response = await self.client.request(method, current_url, **kwargs)
+            request = self.client.build_request(method, current_url, **kwargs)
+            if (
+                self._authenticated_origin is not None
+                and _origin(current_url) != self._authenticated_origin
+            ):
+                for header in ("authorization", "cookie", "proxy-authorization"):
+                    request.headers.pop(header, None)
+            response = await self.client.send(request, follow_redirects=False)
             if self._request_observer is not None:
                 self._request_observer(
                     {
@@ -183,6 +213,13 @@ class ScopedAsyncSession:
                 domain=cookie.get("domain"),
                 path=cookie.get("path", "/"),
             )
+
+
+def _origin(url: str) -> str:
+    parsed = urlsplit(url)
+    default_port = 443 if parsed.scheme == "https" else 80
+    port = parsed.port or default_port
+    return f"{parsed.scheme.lower()}://{parsed.hostname or ''}:{port}"
 
 
 def _retry_delay(response: httpx.Response, attempt: int) -> float:

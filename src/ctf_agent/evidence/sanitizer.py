@@ -55,8 +55,13 @@ class SecretSanitizer:
         "token",
     }
 
-    def __init__(self, extra_patterns: Iterable[str | Pattern[str]] = ()) -> None:
-        self._rules: tuple[_Rule, ...] = (
+    def __init__(
+        self,
+        extra_patterns: Iterable[str | Pattern[str]] = (),
+        *,
+        redact_high_entropy: bool = True,
+    ) -> None:
+        base_rules: tuple[_Rule, ...] = (
             _Rule(
                 "authorization_header",
                 re.compile(
@@ -90,6 +95,8 @@ class SecretSanitizer:
                 ),
                 REDACTION,
             ),
+        )
+        entropy_rules = (
             _Rule(
                 "high_entropy_token",
                 re.compile(
@@ -98,7 +105,8 @@ class SecretSanitizer:
                 ),
                 REDACTION,
             ),
-        ) + tuple(
+        ) if redact_high_entropy else ()
+        self._rules = base_rules + entropy_rules + tuple(
             _Rule(
                 "custom_secret",
                 re.compile(pattern) if isinstance(pattern, str) else pattern,

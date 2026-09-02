@@ -51,6 +51,7 @@ class ReplayVerifier:
             expected_flag=decision.candidate.normalized_value,
             flag_regex=self.flag_regex or FlagPolicy.from_schema(self.gate.policy).regex,
             timeout_seconds=self.timeout_seconds,
+            spec=decision.candidate.reproduction_spec,
         )
         if not replay.success:
             return VerificationOutcome(

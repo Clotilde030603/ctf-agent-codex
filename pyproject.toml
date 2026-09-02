@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 dependencies = [
+  "anyio==4.10.0",
   "httpx==0.28.1",
   "jinja2==3.1.6",
   "pydantic==2.11.7",
@@ -22,6 +23,7 @@ dependencies = [
 browser = ["playwright==1.53.0"]
 dev = [
   "mypy==1.16.1",
+  "playwright==1.53.0",
   "pytest==8.4.1",
   "pytest-asyncio==1.0.0",
   "ruff==0.12.1",
@@ -34,6 +36,9 @@ ctf-agent = "ctf_agent.cli:app"
 [tool.hatch.build.targets.wheel]
 packages = ["src/ctf_agent"]
 
+[tool.hatch.build.targets.wheel.force-include]
+skills = "ctf_agent/skills"
+
 [tool.hatch.version]
 path = "src/ctf_agent/__init__.py"
 
@@ -41,6 +46,10 @@ path = "src/ctf_agent/__init__.py"
 addopts = "-q"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+  "benchmark: long-running real-workflow or full ablation evaluation",
+  "slow: long-running test excluded from ordinary CI",
+]
 filterwarnings = [
   "ignore:'click\\.utils\\.get_.*_stream' is deprecated.*:DeprecationWarning",
 ]
