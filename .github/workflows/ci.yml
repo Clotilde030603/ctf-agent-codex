@@ -54,8 +54,8 @@ jobs:
             ruff check .
             mypy src
             python -m compileall -q src tests evals
-            ctf-agent benchmark evals/manifest.yaml
-            pytest
+            uv build --out-dir /tmp/ctf-agent-dist
+            pytest -m "not benchmark and not slow"
           else
             echo "pyproject.toml not present yet; skipped package checks."
           fi

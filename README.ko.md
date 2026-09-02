@@ -153,13 +153,18 @@ Playwright가 보이는 Chromium 창을 엽니다.
 ctf-agent doctor
 ```
 
-결정론적 paired evaluation 실행:
+선택적으로 결정론적 paired evaluation 실행:
 
 ```bash
 ctf-agent benchmark evals/manifest.v2.yaml \
   --ablation-matrix evals/ablations.yaml \
   --output report.json
 ```
+
+Benchmark는 필수 challenge solve path가 아닌 개발/평가용 subsystem입니다.
+일반 pull-request CI에서는 benchmark workload를 실행하지 않습니다. Full B0-B5
+평가는 전용 `Full B0-B5 Benchmark` workflow에서 manual dispatch, nightly
+schedule 또는 published release 때 실행합니다.
 
 레거시 `evals/manifest.yaml` 명령은 retired warmup/harness smoke test일 뿐이며
 autonomous-workflow benchmark가 아니고 모델 성능 증적으로 사용하면 안 됩니다.

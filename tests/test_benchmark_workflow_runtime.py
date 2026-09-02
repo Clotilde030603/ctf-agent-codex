@@ -29,6 +29,7 @@ def test_benchmark_rejects_matrix_supplied_capability_digest_as_observation() ->
         ScorerInvocation.create(condition)
 
 
+@pytest.mark.benchmark
 @pytest.mark.asyncio
 async def test_autonomous_benchmark_executes_the_real_controller(
     monkeypatch: pytest.MonkeyPatch,
@@ -73,6 +74,7 @@ async def test_autonomous_benchmark_executes_the_real_controller(
     assert record.final_state is not None
 
 
+@pytest.mark.benchmark
 @pytest.mark.asyncio
 async def test_autonomous_metrics_are_derived_from_workflow_events() -> None:
     # Given: one scorer-owned autonomous attempt.
@@ -102,6 +104,7 @@ async def test_autonomous_metrics_are_derived_from_workflow_events() -> None:
     } != legacy_constants
 
 
+@pytest.mark.benchmark
 @pytest.mark.asyncio
 async def test_b0_and_b5_exhibit_distinct_runtime_event_metrics() -> None:
     # Given: identical case/repeat inputs under the two endpoint conditions.

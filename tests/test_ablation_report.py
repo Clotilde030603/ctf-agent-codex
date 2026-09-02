@@ -33,6 +33,7 @@ def test_evaluation_identity_and_case_provenance_are_frozen() -> None:
         assert "/blob/main/" not in case["redistribution"]["evidence_url"]
 
 
+@pytest.mark.benchmark
 def test_cli_report_has_paired_conditions_cost_latency_and_contamination(
     tmp_path: Path,
 ) -> None:
@@ -122,6 +123,7 @@ def test_cli_report_has_paired_conditions_cost_latency_and_contamination(
     assert b5["solved"] is True
 
 
+@pytest.mark.benchmark
 def test_report_is_deterministic_for_same_seed_and_identities(tmp_path: Path) -> None:
     first = tmp_path / "first.json"
     second = tmp_path / "second.json"

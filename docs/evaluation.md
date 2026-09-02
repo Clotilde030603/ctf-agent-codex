@@ -2,6 +2,12 @@
 
 Benchmarks validate repeatability on authorized retired or local fixtures. Manifest v2 separates harness commands from autonomous workflow runs and makes provenance explicit.
 
+Benchmarking is an optional development/evaluation subsystem, not part of the
+required solve path or ordinary pull-request CI. `.github/workflows/full-benchmark.yml`
+runs the full B0-B5 evaluation by manual dispatch, nightly at `0 3 * * *`, and
+when a GitHub Release is published. It is not triggered by `pull_request` or
+ordinary feature-branch pushes.
+
 ## Command
 
 ```bash

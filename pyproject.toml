@@ -46,6 +46,10 @@ path = "src/ctf_agent/__init__.py"
 addopts = "-q"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+  "benchmark: long-running real-workflow or full ablation evaluation",
+  "slow: long-running test excluded from ordinary CI",
+]
 filterwarnings = [
   "ignore:'click\\.utils\\.get_.*_stream' is deprecated.*:DeprecationWarning",
 ]

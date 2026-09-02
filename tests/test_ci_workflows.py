@@ -23,14 +23,47 @@ def test_ci_runs_for_pull_requests_and_v3_base_pushes_only() -> None:
     assert triggers["push"] == {"branches": ["feat/autonomous-ctf-agent-v3"]}
 
 
-def test_package_ci_runs_only_fast_benchmark_smoke() -> None:
+def test_package_ci_excludes_benchmark_workloads() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
 
     script = _step_script(workflow, "package", "Run package checks when implemented")
 
-    assert "ctf-agent benchmark evals/manifest.yaml" in script
-    assert "manifest.v2.yaml" not in script
-    assert "evals/ablations.yaml" not in script
+    assert "ctf-agent benchmark" not in script
+
+
+def test_package_ci_excludes_slow_and_benchmark_tests() -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+
+    script = _step_script(workflow, "package", "Run package checks when implemented")
+
+    assert 'pytest -m "not benchmark and not slow"' in script
+
+
+def test_package_ci_keeps_standard_validation_and_cli_smoke() -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+
+    package_script = _step_script(
+        workflow, "package", "Run package checks when implemented"
+    )
+    pipx_script = _step_script(
+        workflow, "package", "Verify pipx installation and CLI entry point"
+    )
+
+    assert "python -m pip install -e \".[dev]\"" in package_script
+    assert "ruff check ." in package_script
+    assert "mypy src" in package_script
+    assert "python -m compileall -q src tests evals" in package_script
+    assert "uv build --out-dir /tmp/ctf-agent-dist" in package_script
+    assert "pipx install . --force" in pipx_script
+    for command in (
+        "--help",
+        "solve --help",
+        "resume --help",
+        "retry-evidence --help",
+        "benchmark --help",
+        "doctor --help",
+    ):
+        assert f'"$PIPX_CLI" {command}' in pipx_script
 
 
 def test_full_benchmark_has_nightly_manual_release_triggers() -> None:

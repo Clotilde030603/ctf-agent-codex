@@ -154,13 +154,18 @@ Check the complete local runtime first:
 ctf-agent doctor
 ```
 
-Run the deterministic paired evaluation:
+Optionally run the deterministic paired evaluation:
 
 ```bash
 ctf-agent benchmark evals/manifest.v2.yaml \
   --ablation-matrix evals/ablations.yaml \
   --output report.json
 ```
+
+Benchmarking is a development/evaluation subsystem, not part of the required
+challenge solve path. Ordinary pull-request CI does not run benchmark workloads.
+Full B0-B5 evaluation runs in the dedicated `Full B0-B5 Benchmark` workflow on
+manual dispatch, the nightly schedule, or a published release.
 
 The legacy `evals/manifest.yaml` command is a retired warmup/harness smoke test
 only. It is not an autonomous-workflow benchmark and must not be used as
