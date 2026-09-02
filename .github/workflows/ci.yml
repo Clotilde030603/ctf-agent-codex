@@ -43,8 +43,12 @@ jobs:
       - name: Run package checks when implemented
         run: |
           if [ -f pyproject.toml ]; then
-            python -m pip install --upgrade pip
+            python -m pip install --upgrade pip uv
             python -m pip install -e ".[dev]"
+            if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+              sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            fi
+            unshare --user --map-root-user --net -- true
             ruff check .
             mypy src
             python -m compileall -q src tests evals
