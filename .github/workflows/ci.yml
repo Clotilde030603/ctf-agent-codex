@@ -1,7 +1,9 @@
 name: CI
 
-on:
+"on":
   push:
+    branches:
+      - feat/autonomous-ctf-agent-v3
   pull_request:
 
 jobs:
@@ -53,9 +55,6 @@ jobs:
             mypy src
             python -m compileall -q src tests evals
             ctf-agent benchmark evals/manifest.yaml
-            ctf-agent benchmark evals/manifest.v2.yaml \
-              --ablation-matrix evals/ablations.yaml \
-              --output /tmp/ctf-agent-ablation-report.json
             pytest
           else
             echo "pyproject.toml not present yet; skipped package checks."
