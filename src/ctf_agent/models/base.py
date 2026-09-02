@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from ctf_agent.skills import SkillRuntime
+
 
 class ModelBackendError(RuntimeError):
     """Raised when a model backend cannot return a valid structured response."""
@@ -12,9 +14,11 @@ class ModelBackendError(RuntimeError):
 class ModelRequest:
     prompt: str
     system: str | None = None
+    developer: str | None = None
     role: str | None = None
     context: dict[str, Any] = field(default_factory=dict)
     output_schema: dict[str, Any] | None = None
+    skill_runtime: SkillRuntime | None = None
 
     def validate(self) -> None:
         if not self.prompt.strip():

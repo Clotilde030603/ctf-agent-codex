@@ -9,6 +9,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from ctf_agent.reproduction import ReproductionSpec
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
@@ -31,6 +33,7 @@ class RunState(StrEnum):
     DONE = "DONE"
     DONE_WITH_WARNINGS = "DONE_WITH_WARNINGS"
     FAILED = "FAILED"
+    NEEDS_AUTHENTICATION = "NEEDS_AUTHENTICATION"
 
 
 class AuthSession(BaseModel):
@@ -98,6 +101,7 @@ class FlagCandidate(BaseModel):
     source_location: str
     derivation: list[str] = Field(default_factory=list)
     solver_command: str
+    reproduction_spec: ReproductionSpec | None = None
     format_match: bool = False
     provenance_verified: bool = False
     replay_verified: bool = False

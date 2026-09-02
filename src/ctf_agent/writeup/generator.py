@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from datetime import UTC, datetime
 from hashlib import sha256
 from html import escape
 from pathlib import Path
@@ -13,25 +11,8 @@ from typing import Any, cast
 from ctf_agent.evidence.manifest import EvidenceManifest
 from ctf_agent.evidence.provenance import build_provenance_index, save_provenance_index
 from ctf_agent.evidence.sanitizer import SecretSanitizer
-
-
-@dataclass(frozen=True)
-class WriteupContext:
-    run_dir: Path
-    challenge: dict[str, Any]
-    triage: dict[str, Any]
-    hypotheses: dict[str, Any] | list[Any]
-    events: list[dict[str, Any]]
-    evidence: EvidenceManifest
-    solve_py: str
-    generated_at: str
-
-
-@dataclass(frozen=True)
-class WriteupOutputs:
-    markdown_path: Path
-    html_path: Path
-    provenance_path: Path
+from ctf_agent.security import secure_write_text
+from ctf_agent.writeup.context import WriteupContext, WriteupOutputs, load_writeup_context
 
 
 class WriteupGenerator:
@@ -47,22 +28,7 @@ class WriteupGenerator:
         self._sanitizer = sanitizer or SecretSanitizer()
 
     def build_context(self, run_dir: Path) -> WriteupContext:
-        manifest_path = run_dir / "evidence" / "manifest.json"
-        evidence = (
-            EvidenceManifest.load(manifest_path)
-            if manifest_path.exists()
-            else EvidenceManifest(run_id=run_dir.name)
-        )
-        return WriteupContext(
-            run_dir=run_dir,
-            challenge=self._read_json(run_dir / "challenge.json", {}),
-            triage=self._read_json(run_dir / "triage.json", {}),
-            hypotheses=self._read_json(run_dir / "hypotheses.json", []),
-            events=self._read_jsonl(run_dir / "events.jsonl"),
-            evidence=evidence,
-            solve_py=self._read_text(run_dir / "solve.py"),
-            generated_at=datetime.now(UTC).replace(microsecond=0).isoformat(),
-        )
+        return load_writeup_context(run_dir)
 
     def generate(
         self, run_dir: Path, output: Path | None = None, *, redact_flags: bool = False
@@ -76,7 +42,7 @@ class WriteupGenerator:
             markdown = self._redact_flag_text(markdown, flag, True)
         sanitized = self._sanitizer.sanitize(markdown).text
         output_path = output or run_dir / "writeup.md"
-        output_path.write_text(sanitized, encoding="utf-8")
+        secure_write_text(output_path, sanitized)
         return output_path
 
     def generate_all(self, run_dir: Path, *, redact_flags: bool = True) -> WriteupOutputs:
@@ -91,8 +57,8 @@ class WriteupGenerator:
         if redact_flags:
             markdown = self._redact_flag_text(markdown, flag, True)
             html = self._redact_flag_text(html, flag, True)
-        markdown_path.write_text(self._sanitizer.sanitize(markdown).text, encoding="utf-8")
-        html_path.write_text(self._sanitizer.sanitize(html).text, encoding="utf-8")
+        secure_write_text(markdown_path, self._sanitizer.sanitize(markdown).text)
+        secure_write_text(html_path, self._sanitizer.sanitize(html).text)
 
         flag_reference = self._flag_reference(flag, redact_flags=redact_flags)
         source_files = [
@@ -321,22 +287,3 @@ python3 solve.py
             ):
                 return str(evidence_event.data["flag"])
         return str(challenge.get("verified_flag", "not recorded"))
-
-    def _read_json(self, path: Path, default: Any) -> Any:
-        if not path.exists():
-            return default
-        return json.loads(path.read_text(encoding="utf-8"))
-
-    def _read_jsonl(self, path: Path) -> list[dict[str, Any]]:
-        if not path.exists():
-            return []
-        events: list[dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                events.append(json.loads(line))
-        return events
-
-    def _read_text(self, path: Path) -> str:
-        if not path.exists():
-            return ""
-        return path.read_text(encoding="utf-8")

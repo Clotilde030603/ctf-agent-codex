@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import importlib.util
-import shutil
 from dataclasses import dataclass
 
+from ctf_agent.capabilities import CapabilityStatus, RuntimeCapabilitySnapshot
 from ctf_agent.schemas import Hypothesis, SpecialistResult
 
 
@@ -53,8 +52,13 @@ PWN_PROFILE = ToolchainProfile(
 
 
 class ToolchainSpecialist:
-    def __init__(self, profile: ToolchainProfile) -> None:
+    def __init__(
+        self,
+        profile: ToolchainProfile,
+        runtime_capabilities: RuntimeCapabilitySnapshot,
+    ) -> None:
         self.profile = profile
+        self.runtime_capabilities = runtime_capabilities
         self.name = f"{profile.category}-toolchain"
 
     def supports(self, category: str) -> bool:
@@ -71,32 +75,25 @@ class ToolchainSpecialist:
     ) -> SpecialistResult:
         available: list[str] = []
         missing: list[str] = []
+        required_missing: list[ToolRequirement] = []
         for requirement in self.profile.requirements:
-            present = (
-                importlib.util.find_spec(requirement.python_module) is not None
-                if requirement.python_module
-                else shutil.which(requirement.command) is not None
-            )
-            if present:
-                available.append(f"tool available: {requirement.command}")
-            else:
-                importance = "required" if requirement.required else "optional"
-                missing.append(
-                    f"missing dependency ({importance}): {requirement.command}; "
-                    f"{requirement.install}"
+            capability = self.runtime_capabilities.require(requirement.command)
+            if capability.status is CapabilityStatus.AVAILABLE:
+                version = capability.version or "unknown"
+                available.append(
+                    f"tool available: {requirement.command}; version={version}"
                 )
+                continue
+            importance = "required" if requirement.required else "optional"
+            missing.append(
+                f"dependency unavailable ({importance}): {requirement.command}; "
+                f"status={capability.status.value}; reason={capability.reason}; "
+                f"{requirement.install}"
+            )
+            if requirement.required:
+                required_missing.append(requirement)
 
         observations, artifacts = _triage_observations(context, self.profile)
-        required_missing = [
-            item
-            for item in self.profile.requirements
-            if item.required
-            and (
-                importlib.util.find_spec(item.python_module) is None
-                if item.python_module
-                else shutil.which(item.command) is None
-            )
-        ]
         stopped = bool(required_missing)
         return SpecialistResult(
             hypothesis_id=hypothesis.id,

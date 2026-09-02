@@ -1,7 +1,9 @@
 name: CI
 
-on:
+"on":
   push:
+    branches:
+      - feat/autonomous-ctf-agent-v3
   pull_request:
 
 jobs:
@@ -43,13 +45,17 @@ jobs:
       - name: Run package checks when implemented
         run: |
           if [ -f pyproject.toml ]; then
-            python -m pip install --upgrade pip
+            python -m pip install --upgrade pip uv
             python -m pip install -e ".[dev]"
+            if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+              sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            fi
+            unshare --user --map-root-user --net -- true
             ruff check .
             mypy src
             python -m compileall -q src tests evals
-            ctf-agent benchmark evals/manifest.yaml
-            pytest
+            uv build --out-dir /tmp/ctf-agent-dist
+            pytest -m "not benchmark and not slow"
           else
             echo "pyproject.toml not present yet; skipped package checks."
           fi
@@ -64,6 +70,7 @@ jobs:
           "$PIPX_CLI" solve --help
           "$PIPX_CLI" resume --help
           "$PIPX_CLI" retry-evidence --help
+          "$PIPX_CLI" benchmark --help
           "$PIPX_CLI" doctor --help
 
   ctf-tool-image:

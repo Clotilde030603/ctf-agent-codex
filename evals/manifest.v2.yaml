@@ -1,0 +1,146 @@
+schema_version: 2
+evaluation_id: g010-local-pilot-v1
+dataset_revision: local-pilot-2026-09-01
+ablation_revision: b0-b5-v2
+repeat_runs: 3
+timeout_seconds: 30
+total_budget_seconds: 900
+agent:
+  name: ctf-agent-codex
+  version: 0.1.0
+  commit: local-g010
+  model: frozen-by-ablation-matrix
+  reasoning_effort: frozen-by-ablation-matrix
+challenges:
+  - &case
+    id: model-crypto-encoding
+    case_id: model-crypto-encoding
+    runner: autonomous_workflow
+    category: crypto
+    difficulty: {label: easy, source: published, source_value: synthetic-pilot-easy}
+    availability: local
+    source: self-authored
+    license: MIT
+    authorized_for_benchmark: true
+    redistribution: &redistribution
+      allowed: true
+      evidence_url: https://github.com/Clotilde030603/ctf-agent-codex/blob/434cb75299f9d83503cb794737dc5b3cbc78ecb6/LICENSE
+    contamination: &controlled
+      status: controlled
+      details: newly generated synthetic fixture; not a public competition challenge
+    artifact_paths: [fixtures/model-crypto-encoding/input.txt]
+    fixture_sha256: 1b608c96fd3aa781cfd8c61acfac9eda854141a47abba0526c2f89d3465f05e8
+    solution_path: fixtures/model-pilot/run.py
+    solution_sha256: cc5bd6b46a289088619c5020ae6e23b1f0ec389c8f7409aa9aa2e46e1b55bcc6
+    flag_policy: {pattern: 'flag\{[^{}]+\}'}
+    expected_solver_capability: frozen-ablation-condition
+    command: [python3, fixtures/model-pilot/run.py, fixtures/model-crypto-encoding/input.txt]
+    expected_flag: flag{pilot_crypto_encoding}
+
+  - <<: *case
+    id: model-crypto-caesar
+    case_id: model-crypto-caesar
+    difficulty: {label: easy, source: published, source_value: synthetic-pilot-easy}
+    artifact_paths: [fixtures/model-crypto-caesar/input.txt]
+    fixture_sha256: 6a0181b9694af51e3a735079ab1cf498346baace443b0b69b37250d936ed83df
+    command: [python3, fixtures/model-pilot/run.py, fixtures/model-crypto-caesar/input.txt]
+    expected_flag: flag{pilot_crypto_caesar}
+
+  - <<: *case
+    id: model-crypto-modular
+    case_id: model-crypto-modular
+    difficulty: {label: medium, source: empirical, source_value: g010-pilot-stratum-medium}
+    artifact_paths: [fixtures/model-crypto-modular/input.txt]
+    fixture_sha256: dd032e6b180d9e6cce6468500347cdc17a0a526ce76ae4dd9f423fd637cc71c3
+    command: [python3, fixtures/model-pilot/run.py, fixtures/model-crypto-modular/input.txt]
+    expected_flag: flag{pilot_crypto_modular}
+
+  - <<: *case
+    id: model-forensics-metadata
+    case_id: model-forensics-metadata
+    category: forensics
+    difficulty: {label: null, source: solve_count, source_value: 42}
+    artifact_paths: [fixtures/model-forensics-metadata/input.txt]
+    fixture_sha256: 98c90dae16d90457e600edb491f9cf917b6a94cee25bfe251d882b7a2b1f02bf
+    command: [python3, fixtures/model-pilot/run.py, fixtures/model-forensics-metadata/input.txt]
+    expected_flag: flag{pilot_forensics_metadata}
+
+  - <<: *case
+    id: model-forensics-headers
+    case_id: model-forensics-headers
+    category: forensics
+    difficulty: {label: easy, source: published, source_value: synthetic-pilot-easy}
+    artifact_paths: [fixtures/model-forensics-headers/input.txt]
+    fixture_sha256: d6622e535fe1ee0512469dfcb1d876a5f3b685845ede8b955f4210e249dd4e57
+    command: [python3, fixtures/model-pilot/run.py, fixtures/model-forensics-headers/input.txt]
+    expected_flag: flag{pilot_forensics_headers}
+
+  - <<: *case
+    id: model-forensics-archive
+    case_id: model-forensics-archive
+    category: forensics
+    difficulty: {label: medium, source: empirical, source_value: g010-pilot-stratum-medium}
+    artifact_paths: [fixtures/model-forensics-archive/input.txt]
+    fixture_sha256: af1a0f745f04e6031a27895f9ab1b5c4d9393c16405c796990c0a6aadbfa6bf9
+    command: [python3, fixtures/model-pilot/run.py, fixtures/model-forensics-archive/input.txt]
+    expected_flag: flag{pilot_forensics_archive}
+
+  - <<: *case
+    id: model-rev-xor
+    case_id: model-rev-xor
+    category: rev
+    difficulty: {label: null, source: points, source_value: 100}
+    artifact_paths: [fixtures/model-rev-xor/input.txt]
+    fixture_sha256: 705b161e6d747c60bf22c2c7fb32286216c400609a79b2d5f20991c85c142460
+    command: [python3, fixtures/model-pilot/run.py, fixtures/model-rev-xor/input.txt]
+    expected_flag: flag{pilot_rev_xor}
+
+  - <<: *case
+    id: model-rev-bytecode
+    case_id: model-rev-bytecode
+    category: rev
+    difficulty: {label: medium, source: empirical, source_value: g010-pilot-stratum-medium}
+    artifact_paths: [fixtures/model-rev-bytecode/input.txt]
+    fixture_sha256: 991d320feadf3af98e7bcf88b11cf561832af755df953cbd6f6c94877b6bbe83
+    command: [python3, fixtures/model-pilot/run.py, fixtures/model-rev-bytecode/input.txt]
+    expected_flag: flag{pilot_rev_bytecode}
+
+  - <<: *case
+    id: model-rev-strings
+    case_id: model-rev-strings
+    category: rev
+    difficulty: {label: easy, source: published, source_value: synthetic-pilot-easy}
+    artifact_paths: [fixtures/model-rev-strings/input.txt]
+    fixture_sha256: 44d47243f8dbf48747eca71af645235700400e0126a3f085f15fc6a0ac97e80e
+    command: [python3, fixtures/model-pilot/run.py, fixtures/model-rev-strings/input.txt]
+    expected_flag: flag{pilot_rev_strings}
+
+  - <<: *case
+    id: model-web-response
+    case_id: model-web-response
+    category: web
+    difficulty: {label: null, source: unknown, source_value: null}
+    artifact_paths: [fixtures/model-web-response/input.txt]
+    fixture_sha256: 80ea7f859364a086d590f99559be7a6888acd8ebb3e659c5af6bf97dbd0142e1
+    command: [python3, fixtures/model-pilot/run.py, fixtures/model-web-response/input.txt]
+    expected_flag: flag{pilot_web_response}
+
+  - <<: *case
+    id: model-web-cookie
+    case_id: model-web-cookie
+    category: web
+    difficulty: {label: easy, source: published, source_value: synthetic-pilot-easy}
+    artifact_paths: [fixtures/model-web-cookie/input.txt]
+    fixture_sha256: b988a169444e14b36d208f40ad8b471cb1dc30d94a6265051e82d6886475ce1e
+    command: [python3, fixtures/model-pilot/run.py, fixtures/model-web-cookie/input.txt]
+    expected_flag: flag{pilot_web_cookie}
+
+  - <<: *case
+    id: model-web-route
+    case_id: model-web-route
+    category: web
+    difficulty: {label: medium, source: empirical, source_value: g010-pilot-stratum-medium}
+    artifact_paths: [fixtures/model-web-route/input.txt]
+    fixture_sha256: add596c1996d939786706521f0ef50f6e4fb0e2c97213fb42fd840e8189a8303
+    command: [python3, fixtures/model-pilot/run.py, fixtures/model-web-route/input.txt]
+    expected_flag: flag{pilot_web_route}

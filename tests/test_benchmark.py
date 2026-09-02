@@ -141,6 +141,30 @@ challenges:
     assert self_reported["replay_verified"] is None
 
 
+def test_event_metrics_derive_latency_from_created_at() -> None:
+    # Given: scorer-owned events with durable ledger timestamps and no claimed seconds.
+    events = [
+        {"type": "run.created", "created_at": "2026-09-01T00:00:00+00:00"},
+        {
+            "type": "flag.candidate",
+            "created_at": "2026-09-01T00:00:01.250000+00:00",
+            "payload": {},
+        },
+        {
+            "type": "flag.verified",
+            "created_at": "2026-09-01T00:00:02.500000+00:00",
+            "payload": {"accepted": True},
+        },
+    ]
+
+    # When: metrics are derived from the event stream.
+    metrics = _derive_event_metrics(events)
+
+    # Then: latency is relative to the first observed created_at timestamp.
+    assert metrics["time_to_candidate_seconds"] == 1.25
+    assert metrics["time_to_verified_seconds"] == 2.5
+
+
 def test_event_metrics_require_explicit_success_and_completed_resume() -> None:
     missing = _derive_event_metrics(
         [
@@ -226,6 +250,7 @@ challenges:
     flag_policy: {pattern: 'flag\\{[^{}]+\\}'}
     repeat: 2
     expected_solver_capability: model-assisted
+    runner: autonomous_workflow
     command: [python3, solve.py]
     expected_flag: flag{comparison_ok}
     clean_replay: false
@@ -239,8 +264,37 @@ challenges:
     assert result["total_elapsed_seconds"] >= 0
     assert result["agent"]["model"] == "fixture-model"
     assert result["challenges"][0]["repeat_runs"] == 2
-    assert result["challenges"][0]["execution_group"] == "model-solving"
-    assert result["group_summaries"][0]["group"] == "model-solving"
+    assert result["challenges"][0]["execution_group"] == "autonomous_workflow"
+    assert result["group_summaries"][0]["group"] == "autonomous_workflow"
+
+
+def test_fixture_runner_classification_cannot_be_spoofed_by_capability(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "input.txt").write_text("fixture_runner\n", encoding="utf-8")
+    (tmp_path / "solve.py").write_text(
+        "from pathlib import Path\n"
+        "print('flag{' + Path('input.txt').read_text().strip() + '}')\n",
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        """repeat_runs: 1
+challenges:
+  - id: trusted-runner
+    runner: fixture_command
+    expected_solver_capability: model-assisted-planner-solver-verifier
+    command: [python3, solve.py]
+    expected_flag: flag{fixture_runner}
+    clean_replay: false
+""",
+        encoding="utf-8",
+    )
+
+    result = benchmark(manifest)
+
+    assert result["challenges"][0]["execution_group"] == "fixture_command"
+    assert result["group_summaries"][0]["group"] == "fixture_command"
 
 
 def test_comparison_manifest_rejects_unauthorized_fixture(tmp_path: Path) -> None:

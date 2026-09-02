@@ -1,112 +1,140 @@
 # Evaluation
 
-Benchmarks validate repeatability on retired or local CTF fixtures. They do not measure live CTF performance unless the fixture author provides an authorized local target and event data.
+Benchmarks validate repeatability on authorized retired or local fixtures. Manifest v2 separates harness commands from autonomous workflow runs and makes provenance explicit.
+
+Benchmarking is an optional development/evaluation subsystem, not part of the
+required solve path or ordinary pull-request CI. `.github/workflows/full-benchmark.yml`
+runs the full B0-B5 evaluation by manual dispatch, nightly at `0 3 * * *`, and
+when a GitHub Release is published. It is not triggered by `pull_request` or
+ordinary feature-branch pushes.
 
 ## Command
 
 ```bash
-ctf-agent benchmark evals/manifest.yaml
+ctf-agent benchmark evals/manifest.v2.yaml \
+  --ablation-matrix evals/ablations.yaml \
+  --output report.json
 ```
 
-The command prints a JSON report to stdout.
+Use `--solve-k N` for an additional configurable solve@k. Without an ablation matrix, the command retains the v1/v2 single-manifest JSON behavior. `evals/manifest.yaml` remains a v1 harness smoke test.
 
-## Manifest
+## Trusted runner classification
 
-The implemented manifest supports global repeat and budget defaults plus per-challenge overrides:
+Every challenge selects exactly one scorer-controlled execution group:
+
+- `runner: fixture_command` scores expected command output and optional clean replay. It is harness coverage, not autonomous-solving evidence.
+- `runner: autonomous_workflow` requires canonical workflow artifacts and scores those artifacts independently of command output.
+
+`expected_solver_capability` is retained as descriptive v1 metadata. It cannot select or spoof the execution group.
+
+## Manifest v2 metadata
 
 ```yaml
+schema_version: 2
+evaluation_id: frozen-evaluation-v1
+dataset_revision: dataset-2026-09-01
+ablation_revision: b0-b5-v1
 repeat_runs: 3
-timeout_seconds: 30
-total_budget_seconds: 300
+agent:
+  commit: 0123456789abcdef
+  model: model-name
+  reasoning_effort: medium
 challenges:
-  - id: local-retired-warmup
-    category: warmup
-    difficulty: retired
-    source: self-authored
+  - id: licensed-retired-example
+    case_id: licensed-retired-example
+    fixture_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    solution_path: fixtures/model-example/run.py
+    solution_sha256: fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+    runner: autonomous_workflow
+    category: crypto
+    difficulty:
+      label: null
+      source: solve_count
+      source_value: 27
+    availability: retired
+    source: example-event
     license: MIT
-    retired: true
     authorized_for_benchmark: true
-    artifact_paths: [fixtures/retired-warmup/input.txt]
-    flag_policy: {pattern: 'flag\{[^{}]+\}'}
-    expected_solver_capability: deterministic-fixture
-    command: [python3, fixtures/retired-warmup/solve.py]
-    expected_flag: flag{retired_fixture_only}
-    clean_mode: local
+    redistribution:
+      allowed: true
+      evidence_url: https://example.invalid/license
+    contamination:
+      status: unknown
+      details: no training-corpus evidence available
+    command: [python3, fixtures/model-example/run.py]
+    expected_flag_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
-Per-challenge fields include:
+V2 rejects challenges that are unauthorized, lack affirmative redistribution permission evidence, omit contamination or availability metadata, or use a scalar such as `difficulty: retired`. `retired` is availability, never difficulty.
 
-- `id`
-- `category`
-- `difficulty`
-- `source`, `license`, `retired`, `authorized_for_benchmark`
-- `challenge_url`, `artifact_paths`, `flag_policy`
-- `expected_solver_capability`
-- `command`
-- `expected_flag` or `expected_flag_sha256`
-- `repeat_runs`
-- `timeout_seconds`
-- `total_budget_seconds`
-- `workdir`
-- `source_files`
-- `metrics_file`
-- `events_file`
-- `clean_replay`
-- `clean_mode`
-- `replay_command`
-- `docker_image`
+Difficulty sources mean:
 
-The report includes agent name/version/commit/model/reasoning effort and separates
-`deterministic` from `model-solving` groups. Explicitly unauthorized fixtures are
-rejected. The bundled warmup is self-authored and deterministic with zero model
-calls; it is not evidence of difficult CTF solving performance.
+- `published`: an organizer-published `easy`, `medium`, or `hard` label;
+- `points`: original point value, retained in `source_value`;
+- `solve_count`: published solve count, retained in `source_value`;
+- `empirical`: a post-hoc stratum from a named frozen reference run;
+- `unknown`: no defensible label or proxy; both label and source value are null.
 
-Benchmark commands must reference fixture scripts inside the fresh work directory. Inline interpreter execution and path traversal are rejected.
+Proxy and empirical values must not be presented as organizer labels. Redistribution evidence records permission to ship artifacts, not merely permission to access them.
 
-## Clean Replay
+Contamination is `controlled`, `likely_contaminated`, or `unknown`. It is disclosed with counts, rates, and interpretation; it is never folded into solve scores. Evaluation, dataset, fixture, solution, ablation, and configuration hashes are immutable identities. The runner rejects missing, duplicate, stale, or mismatched identities before execution.
 
-Each repeat starts from a fresh copy of the fixture directory. When `clean_replay` is true and the fixture command succeeds, the runner executes `replay_command` or `command` again in a clean copied directory. `clean_mode: docker` uses a no-network Docker command when Docker is available; otherwise that replay is marked skipped with a reason.
+## Frozen B0-B5 matrix
 
-Older README text said the benchmark does not perform a separate clean-environment replay. That statement is stale.
+The matrix follows the cumulative progression in the Korean development specification,
+section 14. Each condition adds one implemented subsystem while preserving every prior
+correction:
 
-## Hardcoded Solver Check
+- **B0 legacy**: the legacy baseline before capability correction; its legacy capability gate legitimately leaves the Python case unsolved, while later stages differ behaviorally rather than by changing that outcome;
+- **B1 capability correction**: B0 plus manifest/provider-backed runtime capability correction;
+- **B2 elastic budget**: B1 plus the durable budget broker, progress evidence, reserves, and reporting;
+- **B3 lane continuity**: B2 plus provenanced per-lane checkpoints, CAS facts, lifecycle events, and crash recovery;
+- **B4 context projection**: B3 plus deterministic role-aware final-request projection;
+- **B5 adaptive frontier**: B4 plus evidence-ranked progressive deepening with active width 3 and total hypothesis pool 6.
 
-If `expected_flag` is present, benchmark rejects solver sources that directly embed the raw flag, base64 flag, hex flag, or Python string constants that construct those forms. This check is local and deterministic; it is not a full semantic proof that a solver is data-dependent.
+Every condition freezes model, reasoning, tool-image digest, skills, solver, artifact, capability snapshot, and the required metrics/statistics contract,
+seed, and a canonical configuration hash. The scorer applies this configuration to an
+actual `AutonomousWorkflow` before launching the evaluated process, then rejects any
+observed identity that differs from the frozen condition. Every run is keyed by
+`(case_id, condition_id, repeat_index)`.
 
-## Metrics
+## Autonomous authoritative scoring
 
-The JSON report includes:
+The scorer creates a private invocation nonce and the configured real `AutonomousWorkflow` benchmark authority before process launch. The nonce remains in scorer memory and is never passed to the
+evaluated command. Runtime model, reasoning, feature gates, skills, seed, tool image,
+solver, and artifact identities are applied to the child environment before execution.
 
-- solve rate;
-- fixture command success rate;
-- clean reproduction rate;
-- Wrong submission count;
-- model call count;
-- tool call count;
-- worker command count and scoped HTTP request count;
-- hallucinated candidate rate;
-- median time to first candidate;
-- median time to verified candidate;
-- median time to Accepted;
-- replay verification rate;
-- independent verification rate;
-- data-dependency verification rate;
-- evidence completion rate;
-- resume verification rate;
-- write-up validation rate;
-- per-challenge repeat records.
-- total benchmark elapsed time.
+The evaluated command may produce only untrusted candidate material such as `solve.py`
+and stdout. SQLite rows, JSONL events, capability/skill artifacts, identity claims, and
+cost claims written by that command have no authoritative path. The scorer independently
+checks the selected source identity, solver hardcoding, positive replay, source-removal
+negative control, expected candidate, final state, costs, metrics, and observed runtime
+identity. A clean replay is an additional reproducibility check, not an authority token.
 
-Official metrics are derived only from scorer-owned command execution and clean replay observations. When `metrics_source: self_reported` is set, optional `benchmark-metrics.json` or `events.jsonl` values are stored separately under `self_reported_metrics`; they do not contribute to aggregate counts or rates. Token and monetary cost are therefore not authoritative benchmark metrics in this release.
+Self-reported metrics remain available separately for diagnostics and never contribute
+to authoritative aggregates. Required reports include scorer-owned metrics and deterministic
+statistics, including context byte counts; command output and self-reported values cannot
+satisfy those fields. Durable workflow event latency is derived from explicit
+elapsed fields or relative `created_at` timestamps. The deterministic offline pilot uses
+a scorer-owned logical stage clock so repeated reports remain byte-for-byte identical.
 
-## Fixtures
+## Solve metrics
 
-Recommended fixture types:
+A run is solved only after authoritative verification and replay. For each challenge:
 
-- fake CTFd server;
-- fake rCTF server;
-- local HTTP challenge service;
-- static attachment-only challenges;
-- mock solver challenges for state, evidence, and write-up validation.
+- **solve@1** is true when the first attempt is a verified solve;
+- **solve@3** is true when any of the first three attempts is a verified solve. If fewer than three attempts ran, it uses the attempts that completed.
 
-Fixture data must not include real credentials, live cookies, private flags from active competitions, or platform session state. Do not commit copyrighted challenge data unless the license permits redistribution.
+Aggregate solve@k is reported as numerator, denominator, and rate. Paired reports provide solve@1, solve@3, configurable solve@k, per-category and per-condition summaries, and B0-relative deltas. Report JSON excludes wall-clock timestamps, UUIDs, command output, and expected flags, so equivalent invocations are byte-for-byte reproducible.
+
+## Clean execution and hardcoded checks
+
+Every attempt starts from a fresh fixture copy. Fixture commands may use `replay_command`; autonomous runs always replay promoted `solve.py`. Inline interpreter source, parent traversal, and commands outside the fixture root are rejected. Source checks reject raw, base64, hex, and simple constructed expected flags; these checks complement artifact/hash verification but are not a semantic proof.
+
+## Pilot fixtures
+
+`evals/manifest.v2.yaml` contains 12 local autonomous pilots: three each for crypto, forensics, reverse engineering, and web. The complete B0-B5 matrix produces 216 paired scorer runs at three repeats per case. Fixtures are authorized, MIT-redistributable, deterministic, network-free, and contamination-controlled.
+
+The pilots validate evaluation plumbing and ablation identity, not frontier-model CTF ability. Offline fixture/synthetic cases must not be reported as real-model performance claims. Their model/tool usage events are deterministic scorer instrumentation, and the capability conditions intentionally share the same local solver outcome. A causal model comparison must preserve this identity and artifact contract while executing the actual frozen capabilities.
+
+Never include live credentials, cookies, active private flags, or artifacts without redistribution permission.

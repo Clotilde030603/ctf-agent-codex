@@ -87,11 +87,22 @@ class BlindVerifier:
                 solver_path,
                 replay_root,
             )
+            replay_spec = (
+                candidate.reproduction_spec.model_copy(
+                    update={
+                        "cwd": replay_root,
+                        "solver_path": replay_root / "solve.py",
+                    }
+                )
+                if candidate.reproduction_spec is not None
+                else None
+            )
             replay = replay_solver(
                 replay_root / "solve.py",
                 expected_flag=None,
                 flag_regex=policy.regex,
                 timeout_seconds=self.timeout_seconds,
+                spec=replay_spec,
             )
         if replay.matched_flag != candidate.normalized_value:
             return BlindVerificationOutcome(
@@ -107,11 +118,22 @@ class BlindVerifier:
         with tempfile.TemporaryDirectory(prefix="ctf-blind-negative-") as negative_dir:
             negative_root = Path(negative_dir)
             shutil.copy2(solver_path, negative_root / "solve.py")
+            negative_spec = (
+                candidate.reproduction_spec.model_copy(
+                    update={
+                        "cwd": negative_root,
+                        "solver_path": negative_root / "solve.py",
+                    }
+                )
+                if candidate.reproduction_spec is not None
+                else None
+            )
             negative_control = replay_solver(
                 negative_root / "solve.py",
                 expected_flag=None,
                 flag_regex=policy.regex,
                 timeout_seconds=self.timeout_seconds,
+                spec=negative_spec,
             )
         if negative_control.matched_flag == candidate.normalized_value:
             return BlindVerificationOutcome(

@@ -10,6 +10,9 @@ src/ctf_agent/
 |-- config.py
 |-- engine.py
 |-- workflow.py
+|-- workflow_parts/        # extracted state handlers
+|-- context_projector/     # role-aware deterministic projection
+|-- lanes/                 # durable checkpoints and lifecycle
 |-- scheduler.py
 |-- platforms/
 |-- ingestion/
@@ -24,7 +27,7 @@ src/ctf_agent/
 
 ## Controller
 
-`engine.Controller` creates a run directory, opens `state.db`, appends `events.jsonl`, enforces `CTF_TOTAL_RUN_TIMEOUT_SECONDS` and `CTF_MAX_STATE_STEPS`, and advances through the registered state handlers in `workflow.AutonomousWorkflow`.
+`engine.Controller` creates a run directory, opens `state.db` (state schema v7), appends `events.jsonl`, enforces `CTF_TOTAL_RUN_TIMEOUT_SECONDS` and `CTF_MAX_STATE_STEPS`, and advances through the registered state handlers in `workflow.AutonomousWorkflow`.
 
 Rules:
 
@@ -76,7 +79,7 @@ The project passes those strings to Codex and does not assume account-level mode
 
 ## Worker Lanes
 
-`workers.WorkerCore` runs a bounded observe-decide-act loop in a lane workspace under `artifacts/lanes/<hypothesis-id>-<fingerprint>/`.
+`workers.WorkerCore` runs a bounded observe-decide-act loop in a lane workspace under `artifacts/lanes/<hypothesis-id>-<fingerprint>/`. Extracted lane lifecycle/checkpoint modules persist provenanced facts and CAS-backed artifact references for pause/resume and crash recovery; native model sessions are never the source of truth.
 
 Allowed worker actions are schema-validated:
 
@@ -84,7 +87,7 @@ Allowed worker actions are schema-validated:
 - `write_file`: writes a relative file inside the lane workspace.
 - `finish`: returns facts and candidates.
 
-Each lane has limits for steps, model calls, commands, command timeout, wall-clock time, and no-progress streaks. Duplicate command fingerprints are skipped. Command stdout, stderr, metadata, exit code, timeout status, redaction status, and generated files are recorded as artifacts.
+Each lane has limits for steps, model calls, commands, command timeout, wall-clock time, and no-progress streaks. Duplicate command fingerprints are skipped. Command stdout, stderr, metadata, exit code, timeout status, redaction status, generated files, and controller-issued command receipts are recorded as artifacts.
 
 Default commands are restricted to tools in the versioned
 `ctf-agent-codex-tools:0.1.0` image, including Python, file, binutils, ExifTool,
@@ -107,7 +110,7 @@ Pwn and reverse-engineering deep solving currently route through the generic mod
 
 ## Platform Boundary
 
-Adapters implement the platform contract in [platform-adapters.md](platform-adapters.md). Platform detection probes CTFd and rCTF API signatures before falling back to generic HTML. Adapters prefer HTTP APIs over browser DOM automation. Playwright is used for first login, storage-state reuse, JavaScript/session handling, and evidence screenshots.
+Adapters implement the platform contract in [platform-adapters.md](platform-adapters.md). Platform detection probes CTFd and rCTF API signatures before falling back to generic HTML. Adapters prefer HTTP APIs over browser DOM automation. Playwright is used for first login, storage-state reuse, JavaScript/session handling, and evidence screenshots. Authentication, HTTP, browser, and trusted-skill availability share the controller-owned capability snapshot.
 
 ## Verification And Evidence
 
@@ -142,4 +145,4 @@ Write-ups use only recorded run facts:
 - submission outcome
 - `evidence/manifest.json`
 
-The generator writes `writeup.md`, `writeup.html`, and `provenance.json`. The validator checks required sections, evidence hashes, unsupported flag-looking values, generated-output provenance, and secret-like material.
+The generator writes `writeup.md`, `writeup.html`, and `provenance.json`. The validator checks required sections, evidence hashes, unsupported flag-looking values, generated-output provenance, and secret-like material. Controller-owned facts, CAS identities, lifecycle/frontier events, and crash migrations remain authoritative; model text is untrusted.

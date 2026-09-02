@@ -1,0 +1,42 @@
+name: Full B0-B5 Benchmark
+
+"on":
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+jobs:
+  full-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install benchmark environment
+        run: |
+          python -m pip install --upgrade pip uv
+          python -m pip install -e ".[dev]"
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --net -- true
+      - name: Run full B0-B5 benchmark
+        run: |
+          ctf-agent benchmark evals/manifest.v2.yaml \
+            --ablation-matrix evals/ablations.yaml \
+            --output full-benchmark-report.json
+      - name: Upload benchmark report
+        uses: actions/upload-artifact@v4
+        with:
+          name: b0-b5-benchmark-report
+          path: full-benchmark-report.json
+          if-no-files-found: error
+          retention-days: 30

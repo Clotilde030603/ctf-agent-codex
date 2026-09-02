@@ -1,0 +1,103 @@
+schema_version: 2
+evaluation_id: g010-local-pilot-v1
+dataset_revision: local-pilot-2026-09-01
+ablation_revision: b0-b5-v2
+conditions:
+- condition_id: B0
+  description: Legacy baseline
+  capability_mode: current
+  budget_mode: shared
+  lane_continuity: false
+  context_projection: false
+  frontier_mode: fixed
+  model_id: offline-pilot-instrumentation-v1
+  reasoning_id: low
+  tool_image_digest: sha256:18f70b4ad953c6ab9df8568bf0e0cd86bd9f8f0767474bc6720ad2ba13b4bd4f
+  capability_snapshot_digest: 21b6d5dd03b00b2eb7a7a627c1aae58089096f36ecce0076ea36d2fb07fbe3e9
+  skill_ids: &id001
+  - ctf-core
+  - category-routing
+  solver_id: model-pilot-run-py@cc5bd6b46a28
+  artifact_id: g010-local-fixtures@local-pilot-2026-09-01
+  seed: 20260901
+  config_sha256: 530b24cee0c220963df9f809c720a9e623ea3727b2f82590b5fe4b9a661c4716
+- condition_id: B1
+  description: Runtime capability correction
+  capability_mode: corrected
+  budget_mode: shared
+  lane_continuity: false
+  context_projection: false
+  frontier_mode: fixed
+  model_id: offline-pilot-instrumentation-v1
+  reasoning_id: low
+  tool_image_digest: sha256:18f70b4ad953c6ab9df8568bf0e0cd86bd9f8f0767474bc6720ad2ba13b4bd4f
+  capability_snapshot_digest: c5a459c41415534b6cad243f9c1be21b80d38ccc446f47354559ca96915e1469
+  skill_ids: *id001
+  solver_id: model-pilot-run-py@cc5bd6b46a28
+  artifact_id: g010-local-fixtures@local-pilot-2026-09-01
+  seed: 20260901
+  config_sha256: c37343f920e1c3f847eb9686ba55953fc798bc1adab7770f272613eedcc4b908
+- condition_id: B2
+  description: Elastic model budget broker
+  capability_mode: corrected
+  budget_mode: elastic
+  lane_continuity: false
+  context_projection: false
+  frontier_mode: fixed
+  model_id: offline-pilot-instrumentation-v1
+  reasoning_id: low
+  tool_image_digest: sha256:18f70b4ad953c6ab9df8568bf0e0cd86bd9f8f0767474bc6720ad2ba13b4bd4f
+  capability_snapshot_digest: c5a459c41415534b6cad243f9c1be21b80d38ccc446f47354559ca96915e1469
+  skill_ids: *id001
+  solver_id: model-pilot-run-py@cc5bd6b46a28
+  artifact_id: g010-local-fixtures@local-pilot-2026-09-01
+  seed: 20260901
+  config_sha256: 3d6ce19d6b6cf1281424e8075f3b7630cb5b18c69a661395e81405c8c7d7d5e7
+- condition_id: B3
+  description: Durable lane continuity
+  capability_mode: corrected
+  budget_mode: elastic
+  lane_continuity: true
+  context_projection: false
+  frontier_mode: fixed
+  model_id: offline-pilot-instrumentation-v1
+  reasoning_id: low
+  tool_image_digest: sha256:18f70b4ad953c6ab9df8568bf0e0cd86bd9f8f0767474bc6720ad2ba13b4bd4f
+  capability_snapshot_digest: c5a459c41415534b6cad243f9c1be21b80d38ccc446f47354559ca96915e1469
+  skill_ids: *id001
+  solver_id: model-pilot-run-py@cc5bd6b46a28
+  artifact_id: g010-local-fixtures@local-pilot-2026-09-01
+  seed: 20260901
+  config_sha256: 5aa6c1da3340ed68ae9dcd4a4c66f96b90738dc43f48f305d217c7ce8a55e3ec
+- condition_id: B4
+  description: Deterministic context projection
+  capability_mode: corrected
+  budget_mode: elastic
+  lane_continuity: true
+  context_projection: true
+  frontier_mode: fixed
+  model_id: offline-pilot-instrumentation-v1
+  reasoning_id: low
+  tool_image_digest: sha256:18f70b4ad953c6ab9df8568bf0e0cd86bd9f8f0767474bc6720ad2ba13b4bd4f
+  capability_snapshot_digest: c5a459c41415534b6cad243f9c1be21b80d38ccc446f47354559ca96915e1469
+  skill_ids: *id001
+  solver_id: model-pilot-run-py@cc5bd6b46a28
+  artifact_id: g010-local-fixtures@local-pilot-2026-09-01
+  seed: 20260901
+  config_sha256: f6502b3136f4fbe1f3abd3dd1e20e9b6a766d11439aa8c6c297861f58268fdbe
+- condition_id: B5
+  description: Adaptive hypothesis frontier
+  capability_mode: corrected
+  budget_mode: elastic
+  lane_continuity: true
+  context_projection: true
+  frontier_mode: adaptive
+  model_id: offline-pilot-instrumentation-v1
+  reasoning_id: low
+  tool_image_digest: sha256:18f70b4ad953c6ab9df8568bf0e0cd86bd9f8f0767474bc6720ad2ba13b4bd4f
+  capability_snapshot_digest: c5a459c41415534b6cad243f9c1be21b80d38ccc446f47354559ca96915e1469
+  skill_ids: *id001
+  solver_id: model-pilot-run-py@cc5bd6b46a28
+  artifact_id: g010-local-fixtures@local-pilot-2026-09-01
+  seed: 20260901
+  config_sha256: 8364755a943aeb642ad71095a64ca871877931329680f06ee133e67e99c9f578

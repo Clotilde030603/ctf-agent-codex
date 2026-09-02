@@ -6,7 +6,7 @@ Model routing is configuration-driven. The code passes user-supplied model ident
 
 | Role | Setting | Used by | Purpose |
 | --- | --- | --- | --- |
-| Planner | `CTF_PLANNER_MODEL`, `CTF_PLANNER_EFFORT` | `ModelHypothesisPlanner` | Creates up to three independent hypotheses from challenge, flag policy, triage, files, services, and prior failures. |
+| Planner | `CTF_PLANNER_MODEL`, `CTF_PLANNER_EFFORT` | `ModelHypothesisPlanner` | Creates up to six total frontier hypotheses from challenge, flag policy, triage, files, services, and prior failures; at most three lanes are active concurrently. |
 | Solver | `CTF_SOLVER_MODEL`, `CTF_SOLVER_EFFORT` | `ModelSolverSpecialist` / `WorkerCore` | Chooses bounded worker actions, writes solver files, runs allowlisted tools, records facts, and emits candidates. |
 | Verifier | `CTF_VERIFIER_MODEL`, `CTF_VERIFIER_EFFORT` | `ModelBlindReviewer` | Re-derives candidates in a clean directory from only `solve.py`, original files, file hashes, and the flag policy; it is not given the solver candidate. |
 
@@ -39,7 +39,7 @@ With `CTF_BACKEND=static`, the workflow skips Codex planner/worker calls and use
 | --- | --- | --- |
 | `CTF_MODEL_TIMEOUT_SECONDS` | `180` | Timeout for each Codex CLI backend call. |
 | `CTF_MODEL_CALL_BUDGET` | `20` | Shared run budget for planner, solver, and verifier model requests. |
-| `CTF_MAX_MODEL_CONTEXT_BYTES` | `524288` | Prompt/context byte limit before calling Codex. |
+| `CTF_MAX_MODEL_CONTEXT_BYTES` | `196608` | Backend hard ceiling for the final rendered request. |
 | `CTF_MAX_WORKERS` | `3` | Maximum concurrent solver lanes. |
 | `CTF_WORKER_MAX_STEPS` | `12` | Maximum model decisions per worker. |
 | `CTF_WORKER_MAX_COMMANDS` | `8` | Maximum command executions per worker. |
@@ -75,6 +75,13 @@ The Codex backend fails closed on:
 - malformed JSON;
 - response that fails schema validation;
 - prompt or output byte limits.
+
+Every Codex call passes through the deterministic `ContextProjector`. Role-specific projected budgets are planner/replan/verifier/reviewer `131072` bytes and solver `196608` bytes; the backend hard ceiling is `196608`. Each budget covers the final rendered role, system/developer and trusted packaged-skill instructions, projected context serialization, and task. Safety, authorized scope, credential
+redaction, and active hypothesis/lane sections are mandatory; projection fails closed
+when those sections alone cannot fit. Each response carries a credential-free
+`projection_manifest` with deterministic section actions, byte counts, policy version,
+provenance/trust labels, and input/output hashes. Challenge, tool, and model text is
+always serialized as untrusted data, never promoted into instruction positions.
 
 Planner failures use static fallback only when `CTF_ALLOW_STATIC_FALLBACK=true`. Worker failures become inconclusive specialist results and are recorded in lane artifacts.
 
