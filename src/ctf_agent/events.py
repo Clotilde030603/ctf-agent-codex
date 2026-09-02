@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ctf_agent.security import redact_persisted_value
+from ctf_agent.security import protect_file, redact_persisted_value
 
 
 class EventLedger:
@@ -20,6 +20,9 @@ class EventLedger:
         self.jsonl.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._initialize()
+        self.jsonl.touch(mode=0o600, exist_ok=True)
+        protect_file(self.database)
+        protect_file(self.jsonl)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database)

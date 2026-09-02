@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ctf_agent.reproduction import ReproductionSpec
+
 
 @dataclass(frozen=True, slots=True)
 class Provenance:
@@ -65,6 +67,7 @@ class FlagCandidate:
     format_match: bool = False
     replay_verified: bool = False
     independent_verified: bool = False
+    reproduction_spec: ReproductionSpec | None = None
 
     @classmethod
     def from_schema(cls, value: Any) -> FlagCandidate:
@@ -93,6 +96,11 @@ class FlagCandidate:
             format_match=bool(data.get("format_match") or False),
             replay_verified=bool(data.get("replay_verified") or False),
             independent_verified=bool(data.get("independent_verified") or False),
+            reproduction_spec=(
+                ReproductionSpec.model_validate(data["reproduction_spec"])
+                if data.get("reproduction_spec") is not None
+                else None
+            ),
         )
 
     @property
@@ -160,6 +168,7 @@ def _as_mapping(value: Any) -> Mapping[str, Any]:
         "format_match",
         "replay_verified",
         "independent_verified",
+        "reproduction_spec",
     )
     return {name: getattr(value, name) for name in names if hasattr(value, name)}
 

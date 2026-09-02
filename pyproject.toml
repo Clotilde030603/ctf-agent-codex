@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 dependencies = [
+  "anyio==4.10.0",
   "httpx==0.28.1",
   "jinja2==3.1.6",
   "pydantic==2.11.7",
@@ -33,6 +34,9 @@ ctf-agent = "ctf_agent.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ctf_agent"]
+
+[tool.hatch.build.targets.wheel.force-include]
+skills = "ctf_agent/skills"
 
 [tool.hatch.version]
 path = "src/ctf_agent/__init__.py"

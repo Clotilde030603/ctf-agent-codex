@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
 DEFAULT_CTF_TOOL_IMAGE = "ctf-agent-codex-tools:0.1.0"
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetSettingsError(ValueError):
+    field: str
+    reason: str
+
+    def __str__(self) -> str:
+        return f"invalid {self.field}: {self.reason}"
 
 
 class Settings(BaseSettings):
@@ -25,8 +35,23 @@ class Settings(BaseSettings):
     verifier_effort: ReasoningEffort = "high"
     model_timeout_seconds: float = Field(default=180, gt=0, le=1800)
     model_call_budget: int = Field(default=20, ge=1, le=200)
-    max_model_context_bytes: int = Field(default=512 * 1024, ge=4096)
+    model_budget_hard_limit: int | None = Field(default=None, ge=1, le=400)
+    model_budget_verifier_floor: int = Field(default=1, ge=0, le=20)
+    model_budget_planner_soft_limit: int = Field(default=1, ge=0, le=20)
+    model_budget_max_extensions: int = Field(default=0, ge=0, le=20)
+    model_budget_extension_size: int = Field(default=1, ge=1, le=20)
+    max_model_context_bytes: int = Field(default=196_608, ge=4096)
+    planner_prompt_budget_bytes: int = Field(default=131_072, ge=4096)
+    solver_prompt_budget_bytes: int = Field(default=196_608, ge=4096)
+    verifier_prompt_budget_bytes: int = Field(default=131_072, ge=4096)
+    reviewer_prompt_budget_bytes: int = Field(default=131_072, ge=4096)
+    replan_prompt_budget_bytes: int = Field(default=131_072, ge=4096)
+    context_recent_report_limit: int = Field(default=3, ge=0, le=100)
     max_workers: int = Field(default=3, ge=1, le=3)
+    lane_quantum_steps: int = Field(default=2, ge=1, le=2)
+    frontier_active_width: int = Field(default=3, ge=1, le=3)
+    frontier_total_pool: int = Field(default=6, ge=1, le=12)
+    frontier_max_rounds: int = Field(default=3, ge=2, le=12)
     allow_static_fallback: bool = False
     total_run_timeout_seconds: float = Field(default=3600, gt=0, le=86400)
     worker_max_steps: int = Field(default=12, ge=1, le=100)
@@ -38,7 +63,7 @@ class Settings(BaseSettings):
     tool_timeout_seconds: float = Field(default=30, gt=0, le=600)
     retry_budget: int = Field(default=2, ge=0, le=10)
     submission_budget: int = Field(default=1, ge=0, le=20)
-    max_hypotheses: int = Field(default=3, ge=1, le=3)
+    max_hypotheses: int = Field(default=6, ge=1, le=12)
     max_state_steps: int = Field(default=100, ge=10, le=1000)
     max_extraction_depth: int = Field(default=3, ge=0, le=10)
     max_extracted_bytes: int = Field(default=256 * 1024 * 1024, ge=1024)
@@ -50,12 +75,35 @@ class Settings(BaseSettings):
     approve_static_submission: bool = False
     redact_flag: bool = False
     docker_image: str = DEFAULT_CTF_TOOL_IMAGE
+    tcp_controller_capability: Literal["unavailable"] = "unavailable"
+    runtime_capability_mode: Literal["current", "corrected"] = "corrected"
+    model_budget_mode: Literal["shared", "elastic"] = "elastic"
+    lane_continuity_enabled: bool = True
+    context_projection_enabled: bool = True
+    adaptive_frontier_enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_model_budget(self) -> Settings:
+        hard_limit = self.model_budget_hard_limit or self.model_call_budget
+        if hard_limit < self.model_call_budget:
+            raise BudgetSettingsError(
+                "model_budget_hard_limit", "must not be below model_call_budget"
+            )
+        if self.model_budget_verifier_floor > self.model_call_budget:
+            raise BudgetSettingsError(
+                "model_budget_verifier_floor", "must fit within model_call_budget"
+            )
+        if self.model_budget_planner_soft_limit > self.model_call_budget:
+            raise BudgetSettingsError(
+                "model_budget_planner_soft_limit", "must fit within model_call_budget"
+            )
+        return self
 
 
 class RunSettingsSnapshot(BaseModel):
     """Versioned, credential-free settings persisted with a run."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 2
     backend: Literal["codex", "static"]
     planner_model: str
     solver_model: str
@@ -65,8 +113,23 @@ class RunSettingsSnapshot(BaseModel):
     verifier_effort: ReasoningEffort
     model_timeout_seconds: float
     model_call_budget: int
+    model_budget_hard_limit: int | None = None
+    model_budget_verifier_floor: int = 1
+    model_budget_planner_soft_limit: int = 1
+    model_budget_max_extensions: int = 0
+    model_budget_extension_size: int = 1
     max_model_context_bytes: int
+    planner_prompt_budget_bytes: int = 131_072
+    solver_prompt_budget_bytes: int = 196_608
+    verifier_prompt_budget_bytes: int = 131_072
+    reviewer_prompt_budget_bytes: int = 131_072
+    replan_prompt_budget_bytes: int = 131_072
+    context_recent_report_limit: int = 3
     max_workers: int
+    lane_quantum_steps: int = 2
+    frontier_active_width: int = 3
+    frontier_total_pool: int = 6
+    frontier_max_rounds: int = 3
     allow_static_fallback: bool
     total_run_timeout_seconds: float
     worker_max_steps: int
@@ -90,6 +153,12 @@ class RunSettingsSnapshot(BaseModel):
     approve_static_submission: bool = False
     redact_flag: bool
     docker_image: str
+    tcp_controller_capability: Literal["unavailable"] = "unavailable"
+    runtime_capability_mode: Literal["current", "corrected"] = "corrected"
+    model_budget_mode: Literal["shared", "elastic"] = "elastic"
+    lane_continuity_enabled: bool = True
+    context_projection_enabled: bool = True
+    adaptive_frontier_enabled: bool = True
 
     @classmethod
     def from_settings(cls, settings: Settings) -> RunSettingsSnapshot:

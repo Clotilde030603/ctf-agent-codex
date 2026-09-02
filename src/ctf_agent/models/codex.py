@@ -1,15 +1,28 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import re
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
+from ctf_agent.context_projector import (
+    POLICY_VERSION,
+    ContextProjector,
+    ProjectedPrompt,
+    ProjectedSection,
+    render_codex_prompt,
+    render_legacy_payload,
+)
+from ctf_agent.context_projector.events import projection_item_events
 from ctf_agent.models.base import ModelBackendError, ModelRequest, ModelResponse
+from ctf_agent.security import protect_directory, protect_file
 
 SandboxMode = Literal["read-only", "workspace-write", "danger-full-access"]
+ProjectionEventObserver = Callable[[str, dict[str, Any]], None]
 
 DEFAULT_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -41,6 +54,9 @@ class CodexCliBackend:
         timeout_seconds: float = 120.0,
         max_prompt_bytes: int = 1_000_000,
         max_output_bytes: int = 1_000_000,
+        recent_report_limit: int = 3,
+        projection_artifacts_dir: Path | None = None,
+        projection_event_observer: ProjectionEventObserver | None = None,
     ) -> None:
         if command is not None and not command:
             raise ValueError("command must not be empty")
@@ -52,6 +68,8 @@ class CodexCliBackend:
             raise ValueError("max_prompt_bytes must be positive")
         if max_output_bytes <= 0:
             raise ValueError("max_output_bytes must be positive")
+        if recent_report_limit < 0:
+            raise ValueError("recent_report_limit must not be negative")
 
         self._legacy_command = tuple(command) if command is not None else None
         self._executable = executable
@@ -62,17 +80,17 @@ class CodexCliBackend:
         self._timeout_seconds = timeout_seconds
         self._max_prompt_bytes = max_prompt_bytes
         self._max_output_bytes = max_output_bytes
+        self._recent_report_limit = recent_report_limit
+        self._projection_artifacts_dir = projection_artifacts_dir
+        self._projection_event_observer = projection_event_observer
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         request.validate()
         if self._legacy_command is not None:
             return await self._complete_legacy_command(request)
 
-        prompt = self._render_prompt(request).encode()
-        if len(prompt) > self._max_prompt_bytes:
-            raise ModelBackendError(
-                f"codex prompt exceeds {self._max_prompt_bytes} byte limit"
-            )
+        projection = self._project(request, render_codex_prompt)
+        prompt = projection.rendered.encode()
 
         with tempfile.TemporaryDirectory(prefix="ctf-agent-codex-") as directory:
             tempdir = Path(directory)
@@ -91,23 +109,12 @@ class CodexCliBackend:
                 raise ModelBackendError(
                     f"codex final message exceeds {self._max_output_bytes} byte limit"
                 )
-            return ModelResponse.from_final_message(final_path.read_text(encoding="utf-8"))
+            response = ModelResponse.from_final_message(final_path.read_text(encoding="utf-8"))
+            return self._with_projection(response, projection.manifest.model_dump(mode="json"))
 
     async def _complete_legacy_command(self, request: ModelRequest) -> ModelResponse:
-        payload = json.dumps(
-            {
-                "prompt": request.prompt,
-                "system": request.system,
-                "role": request.role,
-                "context": request.context,
-                "output_schema": request.output_schema,
-            },
-            sort_keys=True,
-        ).encode()
-        if len(payload) > self._max_prompt_bytes:
-            raise ModelBackendError(
-                f"codex prompt exceeds {self._max_prompt_bytes} byte limit"
-            )
+        projection = self._project(request, render_legacy_payload)
+        payload = projection.rendered.encode()
 
         assert self._legacy_command is not None
         stdout, stderr = await self._run(list(self._legacy_command), payload, cwd=None)
@@ -117,7 +124,76 @@ class CodexCliBackend:
             decoded = json.loads(stdout.decode())
         except json.JSONDecodeError as exc:
             raise ModelBackendError("codex backend returned invalid JSON") from exc
-        return ModelResponse.from_json(decoded)
+        response = ModelResponse.from_json(decoded)
+        return self._with_projection(response, projection.manifest.model_dump(mode="json"))
+
+    def _project(
+        self,
+        request: ModelRequest,
+        renderer: Callable[[ModelRequest, tuple[ProjectedSection, ...]], str],
+    ) -> ProjectedPrompt:
+        role = request.role.strip().lower() if request.role and request.role.strip() else "solver"
+        started = {
+            "role": role,
+            "budget_bytes": self._max_prompt_bytes,
+            "policy_version": POLICY_VERSION,
+        }
+        self._emit_projection_event("context.projection_started", started)
+        try:
+            projection = ContextProjector(
+                self._max_prompt_bytes,
+                recent_report_limit=self._recent_report_limit,
+            ).project(request, renderer)
+        except ModelBackendError as exc:
+            failed = started | {
+                "status": "failed",
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            }
+            failure_identity = hashlib.sha256(
+                json.dumps(
+                    {key: value for key, value in failed.items() if key != "message"},
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest()[:16]
+            self._write_projection_record(role, failure_identity, failed)
+            self._emit_projection_event("context.projection_failed", failed)
+            raise
+        manifest = projection.manifest
+        call_id = manifest.input_sha256[:16]
+        payload = manifest.model_dump(mode="json")
+        self._write_projection_record(role, call_id, payload)
+        for item_event in projection_item_events(manifest):
+            self._emit_projection_event("context.projection_item", item_event)
+        self._emit_projection_event(
+            "context.projection_completed",
+            {
+                "role": role,
+                "call_id": call_id,
+                "included": payload["included"],
+                "summarized": payload["summarized"],
+                "omitted": payload["omitted"],
+                "original_bytes": payload["original_bytes"],
+                "final_bytes": payload["final_bytes"],
+                "input_sha256": payload["input_sha256"],
+                "output_sha256": payload["output_sha256"],
+                "policy_version": payload["policy_version"],
+            },
+        )
+        return projection
+
+    def _write_projection_record(self, role: str, call_id: str, payload: dict[str, Any]) -> None:
+        if self._projection_artifacts_dir is None:
+            return
+        protect_directory(self._projection_artifacts_dir)
+        safe_role = re.sub(r"[^a-z0-9_.-]+", "-", role).strip("-") or "solver"
+        path = self._projection_artifacts_dir / f"{safe_role}-{call_id}-manifest.json"
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        protect_file(path)
+
+    def _emit_projection_event(self, event_type: str, payload: dict[str, Any]) -> None:
+        if self._projection_event_observer is not None:
+            self._projection_event_observer(event_type, payload)
 
     def _command(self, schema_path: Path, final_path: Path) -> list[str]:
         command = [
@@ -176,25 +252,18 @@ class CodexCliBackend:
 
         if process.returncode != 0:
             detail = _decode(stderr or stdout, limit=2_000)
-            raise ModelBackendError(
-                f"codex backend exited with {process.returncode}: {detail}"
-            )
+            raise ModelBackendError(f"codex backend exited with {process.returncode}: {detail}")
         return stdout, stderr
 
     @staticmethod
     def _render_prompt(request: ModelRequest) -> str:
-        sections: list[str] = []
-        if request.role:
-            sections.append(f"Role:\n{request.role.strip()}")
-        if request.system:
-            sections.append(f"System instructions:\n{request.system.strip()}")
-        if request.context:
-            sections.append(
-                "Context JSON:\n"
-                + json.dumps(request.context, indent=2, sort_keys=True, default=str)
-            )
-        sections.append(f"Task:\n{request.prompt.strip()}")
-        return "\n\n".join(sections) + "\n"
+        projection = ContextProjector(1_000_000_000).project(request, render_codex_prompt)
+        return projection.rendered
+
+    @staticmethod
+    def _with_projection(response: ModelResponse, manifest: dict[str, Any]) -> ModelResponse:
+        metadata = response.metadata | {"projection_manifest": manifest}
+        return ModelResponse(content=response.content, raw=response.raw, metadata=metadata)
 
 
 def _decode(value: bytes, *, limit: int) -> str:

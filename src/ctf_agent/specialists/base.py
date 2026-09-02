@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from ctf_agent.lanes.model import LaneRunResult
 from ctf_agent.schemas import Hypothesis, SpecialistResult
 
 
@@ -14,6 +15,20 @@ def progress_made(result: SpecialistResult) -> bool:
         or result.commands
         or result.reproduction_command
     )
+
+
+@runtime_checkable
+@runtime_checkable
+class SliceSpecialist(Protocol):
+    name: str
+
+    async def run_slice(
+        self,
+        hypothesis: Hypothesis,
+        context: dict[str, object],
+        *,
+        max_steps: int | None = None,
+    ) -> LaneRunResult: ...
 
 
 @runtime_checkable

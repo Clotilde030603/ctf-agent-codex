@@ -23,7 +23,7 @@ scope, budgets, verification, and submission. Models can propose hypotheses,
 inspect artifacts, use controlled tools, and write a solver, but they cannot skip
 safety gates or submit arbitrary values.
 
-The project is designed for a user who wants more than a flag-looking model answer.
+The project is designed for a user who wants more than a flag-looking model answer. Authentication, HTTP, browser, and packaged-skill availability are represented by one controller-owned capability snapshot.
 A run preserves its inputs, reasoning artifacts, commands, candidate provenance,
 verification result, platform verdict, evidence, and reproduction instructions.
 
@@ -33,7 +33,7 @@ verification result, platform verdict, evidence, and reproduction instructions.
 | --- | --- |
 | Start from one challenge URL | Platform detection, session check, challenge metadata, attachments, and service hosts |
 | Analyze unfamiliar files | Recursive triage, safe archive extraction, classification, hashes, strings, and tool output |
-| Explore more than one approach | Model-planned hypotheses and up to three isolated asynchronous solver lanes |
+| Explore more than one approach | Evidence-ranked adaptive frontier with progressive deepening: up to six hypotheses total and at most three isolated asynchronous solver lanes active |
 | Use real tools safely | Non-root CTF tool container, bounded argv commands, and host-scoped structured HTTP actions |
 | Avoid false flags | Format, provenance, replay, hardcode, data-dependency, and blind reviewer checks |
 | Submit conservatively | Wrong budget, duplicate prevention, pending-attempt recovery, dry-run, and manual review mode |
@@ -47,8 +47,8 @@ verification result, platform verdict, evidence, and reproduction instructions.
 flowchart LR
     A[Authorized challenge URL] --> B[Authenticate and collect]
     B --> C[Recursive triage]
-    C --> D[Plan up to 3 approaches]
-    D --> E[Isolated solver lanes]
+    C --> D[Plan and rank hypotheses]
+    D --> E[Adaptive frontier: 3 active / 6 total]
     E --> F[Replay and blind verification]
     F --> G[Clean reproduction]
     G --> H{Auto submit?}
@@ -57,6 +57,13 @@ flowchart LR
     J --> K[Evidence and write-up]
     K --> L[DONE or DONE_WITH_WARNINGS]
 ```
+
+At runtime, the CLI creates an `AutonomousWorkflow` and controller-backed run
+state using SQLite schema v7 and `events.jsonl`. The default `codex` path runs
+deterministic artifact/category preflight, `ModelHypothesisPlanner`, bounded
+`ModelSolverSpecialist` lanes through `WorkerCore`, replay and blind
+verification, submission, evidence, write-up, and reproduction. Static mode is
+an explicit deterministic fallback and is not independent verification.
 
 ## Current Project Status
 
@@ -72,8 +79,8 @@ Important limits:
 - the Claude backend is a test stub, not a production integration;
 - broad live compatibility across CTF themes, MFA systems, and dynamic instances is
   not yet proven;
-- the included warmup benchmark is self-authored and is not a claim about difficult
-  real-world CTF solve performance.
+- the included 12-case B0-B5 local pilot is self-authored instrumentation, not a
+  claim about difficult real-world CTF solve performance.
 
 ## Requirements
 
@@ -147,6 +154,19 @@ Check the complete local runtime first:
 ctf-agent doctor
 ```
 
+Run the deterministic paired evaluation:
+
+```bash
+ctf-agent benchmark evals/manifest.v2.yaml \
+  --ablation-matrix evals/ablations.yaml \
+  --output report.json
+```
+
+The legacy `evals/manifest.yaml` command is a retired warmup/harness smoke test
+only. It is not an autonomous-workflow benchmark and must not be used as
+model-performance evidence. The authoritative evaluation uses manifest v2 with
+the scorer-owned real `AutonomousWorkflow`.
+
 Run an authorized challenge without external submission:
 
 ```bash
@@ -219,6 +239,11 @@ ctf-agent resume <run-id> --solver-model "<model>" --solver-effort xhigh
 Resume restores the original non-secret runtime settings. Only explicitly supplied
 options override the snapshot. If the original URL contained a secret query, provide
 it again in memory with `--challenge-url`; it remains redacted on disk.
+If authentication is required while resuming from `SOLVE` or `VERIFY`, the
+controller enters `AUTHENTICATE`, opens the configured authentication route,
+and returns to the interrupted state only after successful reauthentication.
+The in-memory authenticated handle itself is never restored across a process
+restart.
 
 ### Retry evidence after Accepted
 
@@ -306,8 +331,16 @@ cp .env.example .env
 | `CTF_PLANNER_MODEL` | `gpt-5.6-sol` | Planner model identifier |
 | `CTF_SOLVER_MODEL` | `gpt-5.6-sol` | Solver model identifier |
 | `CTF_VERIFIER_MODEL` | `gpt-5.6-sol` | Blind reviewer model identifier |
-| `CTF_MODEL_CALL_BUDGET` | `20` | Run-wide model call limit |
+| `CTF_MODEL_CALL_BUDGET` | `20` | Shared run-wide model-call budget. Elastic extensions are disabled by default (`CTF_MODEL_BUDGET_MAX_EXTENSIONS=0`); when enabled, they require persisted `ProgressEvidence`, preserve planner/verifier reserves, and stay within the hard limit |
+| `CTF_MODEL_BUDGET_VERIFIER_FLOOR` | `1` | Non-borrowable verification reserve |
+| `CTF_MODEL_BUDGET_MAX_EXTENSIONS` | `0` | Maximum evidence-gated elastic extensions |
+| `CTF_MAX_HYPOTHESES` | `6` | Maximum hypotheses admitted to the total frontier pool |
 | `CTF_MAX_WORKERS` | `3` | Maximum concurrent solver lanes |
+| `CTF_LANE_QUANTUM_STEPS` | `2` | Bounded model steps per lane scheduling quantum |
+| `CTF_FRONTIER_ACTIVE_WIDTH` | `3` | Maximum simultaneously active lanes |
+| `CTF_FRONTIER_TOTAL_POOL` | `6` | Maximum total hypotheses retained by the frontier |
+| `CTF_FRONTIER_MAX_ROUNDS` | `3` | Maximum progressive-deepening rounds |
+| `CTF_CONTEXT_RECENT_REPORT_LIMIT` | `3` | Recent report window; durable verified facts remain separate |
 | `CTF_SUBMISSION_BUDGET` | `1` | Durable submission attempt limit |
 | `CTF_ALLOW_PRIVATE_HOSTS` | `false` | Permit authorized private targets |
 | `CTF_ALLOW_LOCAL_REPRODUCTION` | `false` | Opt into weaker host replay |
@@ -315,8 +348,11 @@ cp .env.example .env
 | `CTF_REDACT_FLAG` | `false` | Hide the raw flag in public outputs |
 | `CTF_DOCKER_IMAGE` | `ctf-agent-codex-tools:0.1.0` | Worker/reproduction image |
 
-See [.env.example](.env.example) for every timeout, retry, extraction, worker, model,
-rate, and redaction setting.
+Role projection defaults are planner/replan/verifier/reviewer `131072` bytes and solver `196608` bytes; `CTF_MAX_MODEL_CONTEXT_BYTES=196608` is the backend ceiling. See [.env.example](.env.example) for every timeout, retry, extraction, worker, model, rate, and redaction setting.
+
+Benchmark authority belongs to the scorer-owned real `AutonomousWorkflow`; command output and self-reported metrics are diagnostics only. The local B0-B5 fixtures are offline synthetic/instrumentation cases and are not real-model performance evidence. Reports require the scorer-owned metrics and deterministic statistics, including reproducible context bytes.
+
+The packaged category skills are loaded from the trusted registry and recorded with hashes. Durable lane checkpoints, CAS-backed facts, lifecycle/frontier events, and crash recovery use versioned state artifacts; authenticated handles do not survive process restart and require re-authentication.
 
 ## Troubleshooting
 

@@ -11,7 +11,8 @@ import pytest
 from ctf_agent.config import Settings
 from ctf_agent.models.base import ModelBackend, ModelBackendError, ModelResponse
 from ctf_agent.models.claude import ClaudeStubBackend
-from ctf_agent.schemas import Challenge, FlagPolicy, Hypothesis, RunState
+from ctf_agent.scheduler import Scheduler, SchedulerRunResult
+from ctf_agent.schemas import Challenge, FlagPolicy, Hypothesis, RunState, SpecialistResult
 from ctf_agent.workflow import AutonomousWorkflow
 
 
@@ -107,6 +108,29 @@ def test_default_model_path_calls_planner_with_challenge_and_triage(tmp_path: Pa
     assert persisted[0]["id"] == "H-model"
 
 
+def test_planner_request_structurally_carries_trusted_skill_runtime(tmp_path: Path) -> None:
+    backend = ClaudeStubBackend([_planner_response()])
+    workflow, context = _context(tmp_path, backend)
+
+    asyncio.run(workflow.plan(context))
+
+    request = backend.requests[0]
+    runtime = getattr(request, "skill_runtime", None)
+    assert runtime is not None, "planner request must carry a typed skill runtime"
+    assert runtime.selected_ids == ("ctf-core", "ctf-crypto-binary")
+    assert tuple(item.skill_id for item in runtime.identities) == runtime.selected_ids
+    assert all(len(item.sha256) == 64 for item in runtime.identities)
+    assert runtime.tool_routing.category == "crypto-binary"
+    assert runtime.tool_routing.allowed_actions
+    assert getattr(request, "developer", None) is not None
+    artifact = json.loads(
+        (context.record.run_dir / "artifacts" / "runtime-skills.json").read_text()
+    )
+    assert [item["skill_id"] for item in artifact["selected_skills"]] == list(
+        runtime.selected_ids
+    )
+
+
 def test_malformed_model_plan_uses_bounded_static_fallback(tmp_path: Path) -> None:
     backend = ClaudeStubBackend([ModelResponse(content="not-json")])
     workflow, context = _context(tmp_path, backend, allow_static_fallback=True)
@@ -149,6 +173,157 @@ def test_model_call_budget_prevents_unbounded_planning(tmp_path: Path) -> None:
     assert backend.requests == []
 
 
+def test_autonomous_workflow_uses_typed_quantum_and_multi_round_frontier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: production settings with a bounded lane quantum, distinct width/pool, and depth.
+    settings = Settings(
+        backend="codex",
+        runs_dir=tmp_path / "runs",
+        lane_quantum_steps=1,
+        frontier_active_width=2,
+        frontier_total_pool=4,
+        frontier_max_rounds=3,
+    )
+    observed: dict[str, int] = {}
+
+    async def capture_run(
+        scheduler: Scheduler, context: dict[str, object]
+    ) -> SchedulerRunResult:
+        quantum = context["lane_slice_max_steps"]
+        assert isinstance(quantum, int)
+        observed["quantum"] = quantum
+        observed["width"] = scheduler.max_concurrency
+        observed["rounds"] = scheduler.max_rounds
+        planned = await scheduler.planner.plan(context)
+        return SchedulerRunResult(planned, (), False, "max_rounds")
+
+    monkeypatch.setattr(Scheduler, "run", capture_run)
+    workflow = AutonomousWorkflow(settings)
+    context = workflow.controller().create_run(
+        "https://ctf.test/challenges/quantum", auto_submit=False, writeup=False
+    )
+    context.values["challenge"] = Challenge(
+        id="quantum",
+        url="https://ctf.test/challenges/quantum",
+        title="Quantum",
+        flag_policy=FlagPolicy(pattern=r"flag\{[^{}]+\}"),
+    )
+    context.values["hypotheses"] = [
+        Hypothesis(
+            id=f"H{index}",
+            claim=f"lead {index}",
+            expected_signal="signal",
+            cost="low",
+            confidence=0.5,
+            kill_condition="none",
+            success_condition="candidate",
+        )
+        for index in range(1, 7)
+    ]
+    triage = {"classification": {"primary_category": "misc"}, "files": []}
+    context.values["triage"] = triage
+
+    # When: the real solve entry point constructs its production scheduler.
+    asyncio.run(workflow.solve(context))
+
+    # Then: quantum, active width, depth, and total pool are independent typed controls.
+    assert settings.lane_quantum_steps == 1
+    assert settings.frontier_total_pool == 4
+    assert observed == {"quantum": 1, "width": 2, "rounds": 3}
+    assert len(context.values["hypotheses"]) == 4
+
+
+def test_production_scheduler_extends_budget_from_bounded_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: production elastic policy with exactly one bounded extension.
+    settings = Settings(
+        backend="codex",
+        runs_dir=tmp_path / "runs",
+        model_call_budget=5,
+        model_budget_hard_limit=6,
+        model_budget_max_extensions=1,
+    )
+
+    async def report_progress(
+        scheduler: Scheduler, context: dict[str, object]
+    ) -> SchedulerRunResult:
+        provide_evidence = context.get("progress_evidence_provider")
+        decide_extension = context.get("budget_extension_decider")
+        assert callable(provide_evidence)
+        assert callable(decide_extension)
+        run_dir = Path(str(context["run_dir"]))
+        artifact = run_dir / "artifacts" / "decoded.bin"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(b"controller-observed progress")
+        planned = await scheduler.planner.plan(context)
+        evidence = provide_evidence(
+            (
+                SpecialistResult(
+                    hypothesis_id=planned[0].id,
+                    status="confirmed",
+                    facts=["decoded header proves the payload format"],
+                    artifacts=["artifacts/decoded.bin"],
+                    next_action="derive candidate",
+                ),
+            )
+        )
+        added = decide_extension(evidence)
+        assert added == 1
+        return SchedulerRunResult(planned, (), False, "progress")
+
+    monkeypatch.setattr(Scheduler, "run", report_progress)
+    workflow = AutonomousWorkflow(settings)
+    context = workflow.controller().create_run(
+        "https://ctf.test/challenges/extension", auto_submit=False, writeup=False
+    )
+    context.values["challenge"] = Challenge(
+        id="extension",
+        url="https://ctf.test/challenges/extension",
+        title="Extension",
+        flag_policy=FlagPolicy(pattern=r"flag\{[^{}]+\}"),
+    )
+    context.values["hypotheses"] = [
+        Hypothesis(
+            id="H-progress",
+            claim="decode payload",
+            expected_signal="decoded artifact",
+            cost="low",
+            confidence=0.5,
+            kill_condition="no decoded artifact",
+            success_condition="candidate",
+        )
+    ]
+    context.values["triage"] = {
+        "classification": {"primary_category": "misc"},
+        "files": [],
+    }
+
+    # When: the real workflow constructs and runs its production scheduler.
+    asyncio.run(workflow.solve(context))
+
+    # Then: the controller-owned decision extends and persists the runtime report.
+    broker = context.values["model_budget"]
+    assert broker.snapshot().extended == 1
+    report = json.loads(
+        (context.record.run_dir / "artifacts" / "model-budget.json").read_text()
+    )
+    assert report["extended"] == 1
+    assert report["final_stop_reason"] == "progress"
+    assert set(report["roles"]) == {"planner", "solver", "verifier"}
+    assert any(
+        event["event_type"] == "budget.extended"
+        for event in context.ledger.list(context.record.run_id)
+    )
+
+
+def test_lane_quantum_steps_rejects_values_outside_one_or_two() -> None:
+    # Given/When/Then: construction rejects an unbounded lane quantum.
+    with pytest.raises(ValueError, match="lane_quantum_steps"):
+        Settings(lane_quantum_steps=3)
+
+
 def test_model_solver_worker_is_used_when_preflight_finds_no_flag(tmp_path: Path) -> None:
     planner_backend = ClaudeStubBackend([_planner_response()])
     solver_source = (
@@ -161,7 +336,7 @@ def test_model_solver_worker_is_used_when_preflight_finds_no_flag(tmp_path: Path
         "source_artifact": "files/payload.txt",
         "source_location": "base64 decoded bytes",
         "derivation": ["base64 decode"],
-        "solver_command": "python3 solve.py",
+        "solver_command": f"{sys.executable} solve.py",
         "confidence": 0.91,
     }
     solver_backend = ClaudeStubBackend(
@@ -262,7 +437,23 @@ def test_model_solver_worker_is_used_when_preflight_finds_no_flag(tmp_path: Path
         for result in persisted
         for candidate in result["flag_candidates"]
     )
+    reproduction_spec = next(
+        candidate["reproduction_spec"]
+        for result in persisted
+        for candidate in result["flag_candidates"]
+        if candidate["value"] == "flag{workflow_model_worker}"
+    )
+    assert Path(reproduction_spec["cwd"]) == context.record.run_dir
+    assert Path(reproduction_spec["solver_path"]) == context.record.run_dir / "solve.py"
+    assert reproduction_spec["argv"] == [sys.executable, "solve.py"]
+    assert reproduction_spec["env_keys"] == []
     assert len(solver_backend.requests) == 3
+    assert all(
+        request.skill_runtime is not None
+        and request.skill_runtime.selected_ids == ("ctf-core", "ctf-rev")
+        and request.developer is not None
+        for request in solver_backend.requests
+    )
     model_events = [
         event
         for event in context.ledger.list(context.record.run_id)
@@ -293,7 +484,7 @@ def test_solver_lanes_cannot_exceed_shared_model_budget_after_plan(tmp_path: Pat
         Settings(
             backend="codex",
             runs_dir=tmp_path / "runs",
-            model_call_budget=2,
+            model_call_budget=3,
             max_hypotheses=1,
             max_workers=1,
             worker_max_steps=4,

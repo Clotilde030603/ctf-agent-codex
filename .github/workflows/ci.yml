@@ -49,6 +49,9 @@ jobs:
             mypy src
             python -m compileall -q src tests evals
             ctf-agent benchmark evals/manifest.yaml
+            ctf-agent benchmark evals/manifest.v2.yaml \
+              --ablation-matrix evals/ablations.yaml \
+              --output /tmp/ctf-agent-ablation-report.json
             pytest
           else
             echo "pyproject.toml not present yet; skipped package checks."
@@ -64,6 +67,7 @@ jobs:
           "$PIPX_CLI" solve --help
           "$PIPX_CLI" resume --help
           "$PIPX_CLI" retry-evidence --help
+          "$PIPX_CLI" benchmark --help
           "$PIPX_CLI" doctor --help
 
   ctf-tool-image:

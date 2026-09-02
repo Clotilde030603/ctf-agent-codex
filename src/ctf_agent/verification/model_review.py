@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from ctf_agent.config import Settings
 from ctf_agent.models.base import ModelBackend, ModelBackendError, ModelRequest
 from ctf_agent.models.factory import create_codex_backend
+from ctf_agent.skills import SkillSelection
 
 ReviewerBackendFactory = Callable[[Settings, str, Path], ModelBackend]
 
@@ -49,6 +50,7 @@ class ModelBlindReviewer:
     run_dir: Path
     flag_policy: dict[str, object]
     backend_factory: ReviewerBackendFactory = create_codex_backend
+    skills: SkillSelection | None = None
 
     async def derive(self) -> ModelReviewOutcome:
         solver = self.run_dir / "solve.py"
@@ -61,11 +63,20 @@ class ModelBlindReviewer:
             if files.is_dir():
                 _copy_regular_tree(files, review_dir / "files")
             inventory = _file_inventory(review_dir / "files")
-            backend = self.backend_factory(self.settings, "verifier", review_dir)
+            backend = (
+                create_codex_backend(
+                    self.settings,
+                    "reviewer",
+                    review_dir,
+                    projection_run_dir=self.run_dir,
+                )
+                if self.backend_factory is create_codex_backend
+                else self.backend_factory(self.settings, "reviewer", review_dir)
+            )
             try:
                 response = await backend.complete(
                     ModelRequest(
-                        role="verifier",
+                        role="reviewer",
                         system=(
                             "Blindly verify an authorized CTF solver. The expected candidate is "
                             "not provided. Inspect original files and solve.py, run the solver if "
@@ -83,6 +94,14 @@ class ModelBlindReviewer:
                             "files": inventory,
                         },
                         output_schema=ModelReviewResponse.model_json_schema(),
+                        developer=(
+                            self.skills.developer_instructions
+                            if self.skills is not None
+                            else None
+                        ),
+                        skill_runtime=(
+                            self.skills.runtime if self.skills is not None else None
+                        ),
                     )
                 )
             except ModelBackendError as exc:

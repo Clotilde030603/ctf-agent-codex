@@ -10,6 +10,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from ctf_agent.reproduction import ReproductionSpec
+
 
 @dataclass(frozen=True, slots=True)
 class ReplayResult:
@@ -35,16 +37,26 @@ def replay_solver(
     extra_env: Mapping[str, str] | None = None,
     python_executable: str = sys.executable,
     args: Sequence[str] = (),
+    spec: ReproductionSpec | None = None,
 ) -> ReplayResult:
     solver_path = solver_path.resolve()
-    run_cwd = (cwd or solver_path.parent).resolve()
-    command = (python_executable, str(solver_path), *tuple(args))
+    run_cwd = (spec.cwd if spec is not None else cwd or solver_path.parent).resolve()
+    command = (
+        spec.argv
+        if spec is not None
+        else (python_executable, str(solver_path), *tuple(args))
+    )
+    referenced_env = (
+        {key: os.environ[key] for key in spec.env_keys if key in os.environ}
+        if spec is not None
+        else extra_env
+    )
 
     try:
         completed = subprocess.run(
             command,
             cwd=run_cwd,
-            env=_fresh_env(extra_env),
+            env=_fresh_env(referenced_env),
             text=True,
             capture_output=True,
             timeout=timeout_seconds,

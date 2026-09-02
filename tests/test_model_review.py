@@ -42,7 +42,7 @@ def test_model_reviewer_derives_without_expected_candidate_in_request(tmp_path: 
     )
 
     def factory(_settings: Settings, role: str, cwd: Path) -> ModelBackend:
-        assert role == "verifier"
+        assert role == "reviewer"
         assert (cwd / "solve.py").is_file()
         return backend
 
@@ -138,6 +138,9 @@ def test_codex_workflow_requires_reviewer_model_match(tmp_path: Path) -> None:
     verified = context.values["candidate"]
     assert isinstance(verified, FlagCandidate)
     assert verified.independent_verified is True
+    assert backend.requests[0].skill_runtime is not None
+    assert backend.requests[0].skill_runtime.selected_ids == ("ctf-core",)
+    assert backend.requests[0].developer is not None
     assert any(
         event["event_type"] == "model.completed"
         and event["payload"].get("role") == "verifier"

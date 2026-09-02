@@ -11,6 +11,7 @@ from ctf_agent.config import Settings
 from ctf_agent.models.base import ModelBackendError, ModelRequest
 from ctf_agent.models.codex import CodexCliBackend
 from ctf_agent.models.factory import create_codex_backend
+from ctf_agent.skills import SkillRegistry
 
 
 def test_codex_backend_uses_final_message_contract(tmp_path: Path) -> None:
@@ -42,13 +43,16 @@ final.write_text(json.dumps({"content": "flag{ok}", "metadata": payload}))
         timeout_seconds=5,
     )
 
+    skills = SkillRegistry.repository().select("pwn")
     response = asyncio.run(
         backend.complete(
             ModelRequest(
                 role="ctf-planner",
                 system="Return JSON only.",
+                developer=skills.developer_instructions,
                 prompt="Solve the challenge.",
                 context={"url": "https://ctf.test/challenges/1"},
+                skill_runtime=skills.runtime,
             )
         )
     )
@@ -68,6 +72,13 @@ final.write_text(json.dumps({"content": "flag{ok}", "metadata": payload}))
     assert args[-1] == "-"
     assert "Role:\nctf-planner" in response.metadata["prompt"]
     assert "System instructions:\nReturn JSON only." in response.metadata["prompt"]
+    assert "Developer instructions:" in response.metadata["prompt"]
+    assert "Skill runtime JSON:" in response.metadata["prompt"]
+    assert all(
+        identity.skill_id in response.metadata["prompt"]
+        and identity.sha256 in response.metadata["prompt"]
+        for identity in skills.identities
+    )
     assert '"url": "https://ctf.test/challenges/1"' in response.metadata["prompt"]
     assert response.metadata["schema"]["required"] == ["content"]
 
